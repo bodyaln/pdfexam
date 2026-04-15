@@ -1,0 +1,121 @@
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f5f7fb;
+    color: #222;
+}
+
+.app {
+    min-height: 100vh;
+}
+
+.toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background: #ffffff;
+    border-bottom: 1px solid #d9dee8;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.toolbar-right {
+    font-size: 14px;
+    color: #4a5568;
+}
+
+.status-error {
+    color: #c53030;
+    font-weight: 600;
+}
+
+button {
+    border: 1px solid #cbd5e0;
+    background: #fff;
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+button:hover:not(:disabled) {
+    background: #f0f4f8;
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+input[type="file"] {
+    font-size: 14px;
+}
+
+.viewer {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 24px;
+}
+
+.page-wrapper {
+    position: relative;
+    background: white;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
+}
+
+.pdf-canvas {
+    display: block;
+}
+
+.overlay-layer {
+    position: absolute;
+    inset: 0;
+}
+
+.overlay-wrapper {
+    position: absolute;
+    overflow: hidden;
+}
+
+.overlay-cover {
+    position: absolute;
+    background: #ffffff;
+}
+
+.overlay-text {
+    position: absolute;
+    outline: none;
+    border: 1px solid transparent;
+    background: transparent;
+    color: #111;
+    white-space: nowrap;
+    overflow: visible;
+    line-height: 1.2;
+    margin: 0;
+    min-height: 1em;
+    display: inline-block;
+}
+
+.overlay-text:focus {
+    border: 1px dashed #2563eb;
+}
+
+.overlay-text.changed {
+    border: 1px dashed #16a34a;
+}

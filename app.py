@@ -15,8 +15,6 @@ FONTS_DIR = BASE_DIR / "fonts"
 FONTS_DIR.mkdir(exist_ok=True)
 
 RUNTIME_FONTS = {}
-
-# Замість uploads/outputs — зберігання в пам'яті
 PDF_STORE = {}
 GENERATED_PDF_STORE = {}
 
@@ -77,11 +75,6 @@ def normalize_text(value: str) -> str:
 def is_diacritic_span(span) -> bool:
     stripped = (span.get("text", "") or "").strip()
     return bool(stripped) and all(ch in DIACRITIC_SPAN_CHARS for ch in stripped)
-
-
-def is_neutral_style_span(span) -> bool:
-    text = span.get("text", "") or ""
-    return not text.strip() or is_diacritic_span(span)
 
 
 def font_traits(font_name: str, flags: int = 0):
@@ -551,6 +544,27 @@ def find_best_span_for_rect(page, rect: fitz.Rect):
     return best_span
 
 
+def build_erase_rect(old_rect: fitz.Rect, new_rect: fitz.Rect, font_size: float):
+    erase_rect = fitz.Rect(
+        min(old_rect.x0, new_rect.x0),
+        min(old_rect.y0, new_rect.y0),
+        max(old_rect.x1, new_rect.x1),
+        max(old_rect.y1, new_rect.y1),
+    )
+    erase_rect.y0 -= font_size * 0.05
+    erase_rect.y1 += font_size * 0.05
+    return erase_rect
+
+
+def erase_old_and_new_regions(page, old_rect: fitz.Rect, new_rect: fitz.Rect, font_size: float):
+    erase_rect = build_erase_rect(old_rect, new_rect, font_size)
+    try:
+        page.add_redact_annot(erase_rect, fill=(1, 1, 1))
+        page.apply_redactions()
+    except Exception:
+        page.draw_rect(erase_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+
+
 def replace_text_keep_style(
     doc,
     page,
@@ -562,12 +576,56 @@ def replace_text_keep_style(
     flags=0,
     size=None,
     color_int=None,
+    draw_x_override=None,
+    current_x1_override=None,
+):
+    new_text = normalize_pdf_unicode_text(new_text)
+    operation = build_text_operation(
+        doc=doc,
+        page=page,
+        rect=rect,
+        new_text=new_text,
+        max_x=max_x,
+        origin_y=origin_y,
+        font_name=font_name,
+        flags=flags,
+        size=size,
+        color_int=color_int,
+        draw_x_override=draw_x_override,
+        current_x1_override=current_x1_override,
+    )
+
+    if operation is None:
+        return False
+
+    try:
+        page.add_redact_annot(operation["erase_rect"], fill=(1, 1, 1))
+        page.apply_redactions()
+    except Exception:
+        page.draw_rect(operation["erase_rect"], color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+
+    return insert_text_operation(page, operation)
+
+
+def build_text_operation(
+    doc,
+    page,
+    rect,
+    new_text,
+    max_x=None,
+    origin_y=None,
+    font_name=None,
+    flags=0,
+    size=None,
+    color_int=None,
+    draw_x_override=None,
+    current_x1_override=None,
 ):
     new_text = normalize_pdf_unicode_text(new_text)
     span = find_best_span_for_rect(page, rect)
 
     if span is None and (font_name is None or size is None or color_int is None or origin_y is None):
-        return False
+        return None
 
     if span is not None:
         font_name = span.get("font", font_name or "")
@@ -585,52 +643,46 @@ def replace_text_keep_style(
 
     selected_font = choose_insert_font(doc, page, font_name, flags, new_text)
     if selected_font is None:
-        return False
+        return None
 
+    original_draw_x = float(rect.x0)
+    draw_x = float(draw_x_override) if draw_x_override is not None else original_draw_x
     right_limit = float(max_x) if max_x is not None else page.rect.width - 5
-    erase_rect = fitz.Rect(rect)
-    draw_x = float(rect.x0)
     available_width = max(right_limit - draw_x, 1)
 
-    erase_rect.y0 -= font_size * 0.05
-    erase_rect.y1 += font_size * 0.05
-
     try:
-        new_width = selected_font["font_obj"].text_length(new_text, fontsize=font_size)
+        final_width = selected_font["font_obj"].text_length(new_text, fontsize=font_size)
     except Exception:
-        new_width = float("inf")
+        return None
 
-    test_size = font_size
-    if new_width > available_width:
-        for _ in range(20):
-            try:
-                w = selected_font["font_obj"].text_length(new_text, fontsize=test_size)
-            except Exception:
-                w = available_width + 1
+    if final_width > available_width + 1.5:
+        return None
 
-            if w <= available_width:
-                break
+    new_rect_x1 = draw_x + final_width + 2
+    if current_x1_override is not None:
+        new_rect_x1 = max(new_rect_x1, float(current_x1_override))
+    new_rect_x1 = min(new_rect_x1, right_limit)
 
-            test_size -= 0.5
-            if test_size < MIN_REPLACEMENT_FONT_SIZE:
-                test_size = MIN_REPLACEMENT_FONT_SIZE
-                break
+    old_rect = fitz.Rect(rect)
+    new_rect = fitz.Rect(draw_x, rect.y0, new_rect_x1, rect.y1)
+    erase_rect = build_erase_rect(old_rect, new_rect, font_size)
 
-    try:
-        final_width = selected_font["font_obj"].text_length(new_text, fontsize=test_size)
-    except Exception:
-        final_width = available_width
+    return {
+        "text": new_text,
+        "draw_x": draw_x,
+        "baseline_y": baseline_y,
+        "font_size": font_size,
+        "color": color,
+        "selected_font": selected_font,
+        "erase_rect": erase_rect,
+    }
 
-    erase_rect.x1 = max(erase_rect.x1, draw_x + final_width + 2)
-    if erase_rect.x1 > right_limit:
-        erase_rect.x1 = right_limit
 
-    try:
-        page.add_redact_annot(erase_rect, fill=(1, 1, 1))
-        page.apply_redactions()
-    except Exception:
-        page.draw_rect(erase_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+def insert_text_operation(page, operation):
+    if operation["text"] == "":
+        return True
 
+    selected_font = operation["selected_font"]
     try:
         if selected_font["mode"] == "buffer":
             runtime_font_name = f"F_{uuid.uuid4().hex[:8]}"
@@ -639,16 +691,46 @@ def replace_text_keep_style(
             runtime_font_name = selected_font["font_name"]
 
         page.insert_text(
-            fitz.Point(draw_x, baseline_y),
-            new_text,
+            fitz.Point(operation["draw_x"], operation["baseline_y"]),
+            operation["text"],
             fontname=runtime_font_name,
-            fontsize=test_size,
-            color=color,
+            fontsize=operation["font_size"],
+            color=operation["color"],
             overlay=True,
         )
         return True
     except Exception:
         return False
+
+
+def move_block_keep_style(
+    doc,
+    page,
+    rect,
+    text,
+    max_x=None,
+    origin_y=None,
+    font_name=None,
+    flags=0,
+    size=None,
+    color_int=None,
+    draw_x_override=None,
+    current_x1_override=None,
+):
+    return replace_text_keep_style(
+        doc=doc,
+        page=page,
+        rect=rect,
+        new_text=text,
+        max_x=max_x,
+        origin_y=origin_y,
+        font_name=font_name,
+        flags=flags,
+        size=size,
+        color_int=color_int,
+        draw_x_override=draw_x_override,
+        current_x1_override=current_x1_override,
+    )
 
 
 @app.route("/")
@@ -706,15 +788,13 @@ def apply_pdf_changes():
 
     try:
         doc = fitz.open(stream=item["bytes"], filetype="pdf")
+        operations_by_page = {}
 
         for change in changes:
             old_text = normalize_pdf_unicode_text(change.get("oldText", ""))
             new_text = normalize_pdf_unicode_text(
                 (change.get("newText", "") or "").replace("\n", " ")
             )
-
-            if normalize_text(old_text) == normalize_text(new_text):
-                continue
 
             page = doc[int(change["page"])]
             rect = fitz.Rect(
@@ -723,9 +803,16 @@ def apply_pdf_changes():
                 float(change["x1"]),
                 float(change["y1"]),
             )
-            max_x = float(change["maxX"]) if change.get("maxX") is not None else None
 
-            ok = replace_text_keep_style(
+            max_x = float(change["maxX"]) if change.get("maxX") is not None else None
+            draw_x = float(change["drawX"]) if change.get("drawX") is not None else None
+            current_x1 = float(change["currentX1"]) if change.get("currentX1") is not None else None
+            moved_only = bool(change.get("movedOnly", False))
+
+            if normalize_text(old_text) == normalize_text(new_text) and draw_x is None and not moved_only:
+                continue
+
+            operation = build_text_operation(
                 doc=doc,
                 page=page,
                 rect=rect,
@@ -736,10 +823,41 @@ def apply_pdf_changes():
                 flags=int(change.get("flags", 0)),
                 size=float(change["size"]) if change.get("size") is not None else None,
                 color_int=int(change["color"]) if change.get("color") is not None else None,
+                draw_x_override=draw_x,
+                current_x1_override=current_x1,
             )
 
-            if not ok:
-                print("WARNING: could not replace text:", old_text, "->", new_text)
+            if operation is None:
+                print("WARNING: could not apply change:", old_text, "->", new_text)
+                continue
+
+            operation["page_index"] = int(change["page"])
+            operations_by_page.setdefault(operation["page_index"], []).append(operation)
+
+        for page_index, operations in operations_by_page.items():
+            page = doc[page_index]
+            redaction_ok = True
+
+            try:
+                for operation in operations:
+                    page.add_redact_annot(operation["erase_rect"], fill=(1, 1, 1))
+                page.apply_redactions()
+            except Exception:
+                redaction_ok = False
+
+            if not redaction_ok:
+                for operation in operations:
+                    page.draw_rect(
+                        operation["erase_rect"],
+                        color=(1, 1, 1),
+                        fill=(1, 1, 1),
+                        overlay=True,
+                    )
+
+            operations.sort(key=lambda item: (item["baseline_y"], item["draw_x"]))
+            for operation in operations:
+                if not insert_text_operation(page, operation):
+                    print("WARNING: could not insert text:", operation["text"])
 
         out_buffer = io.BytesIO()
         doc.save(out_buffer, garbage=4, deflate=True)

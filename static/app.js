@@ -84,6 +84,25 @@ function placeCursorAtEnd(el) {
     sel.addRange(range);
 }
 
+function setCursorOffset(el, offset) {
+    const selection = window.getSelection();
+    const textNode = el.firstChild;
+    const safeOffset = Math.max(0, Math.min(offset, editorText(el).length));
+
+    if (!selection) return;
+
+    if (!textNode) {
+        placeCursorAtEnd(el);
+        return;
+    }
+
+    const range = document.createRange();
+    range.setStart(textNode, Math.min(safeOffset, textNode.textContent.length));
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+}
+
 function getSelectionOffsets(element) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
@@ -118,6 +137,45 @@ function buildPredictedText(currentText, insertText, start, end) {
     return currentText.slice(0, start) + insertText + currentText.slice(end);
 }
 
+function buildDeletedText(currentText, start, end, direction) {
+    if (start !== end) {
+        return {
+            text: currentText.slice(0, start) + currentText.slice(end),
+            cursor: start,
+        };
+    }
+
+    if (direction === "forward") {
+        if (start >= currentText.length) {
+            return { text: currentText, cursor: start };
+        }
+
+        const nextChars = Array.from(currentText.slice(start));
+        const deleteLength = nextChars[0]?.length || 1;
+
+        return {
+            text:
+                currentText.slice(0, start) +
+                currentText.slice(start + deleteLength),
+            cursor: start,
+        };
+    }
+
+    if (start <= 0) {
+        return { text: currentText, cursor: start };
+    }
+
+    const previousChars = Array.from(currentText.slice(0, start));
+    const previousChar = previousChars[previousChars.length - 1] || "";
+    const deleteLength = previousChar.length || 1;
+    const cursor = Math.max(start - deleteLength, 0);
+
+    return {
+        text: currentText.slice(0, cursor) + currentText.slice(start),
+        cursor,
+    };
+}
+
 function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
 }
@@ -131,10 +189,9 @@ function getTextMeasurer() {
         measurer.style.left = "-99999px";
         measurer.style.top = "-99999px";
         measurer.style.visibility = "hidden";
-        measurer.style.whiteSpace = "nowrap";
+        measurer.style.whiteSpace = "pre";
         document.body.appendChild(measurer);
     }
-
     return measurer;
 }
 
@@ -146,6 +203,7 @@ function measureRawTextWidthForElement(el, text) {
     measurer.style.fontWeight = el.style.fontWeight;
     measurer.style.lineHeight = el.style.lineHeight || "1.2";
     measurer.style.letterSpacing = "0px";
+    measurer.style.whiteSpace = "pre";
     measurer.textContent = text || "";
     return measurer.getBoundingClientRect().width;
 }
@@ -179,11 +237,20 @@ function calculatePdfLetterSpacing(el, text) {
     );
 }
 
+function editorHasChanges(editor) {
+    return normalize(editorText(editor)) !== normalize(editor.dataset.oldText);
+}
+
+function editorMoved(editor) {
+    const originalLeft = Number(editor.dataset.leftPx || 0);
+    const dynamicLeft = Number(editor.dataset.dynamicLeftPx || originalLeft);
+    return Math.abs(dynamicLeft - originalLeft) > 0.5;
+}
+
 function applyPdfLetterSpacing(el) {
     const changed = editorHasChanges(el);
-    const editing = document.activeElement === el;
 
-    if (changed || editing) {
+    if (changed) {
         el.style.letterSpacing = "0px";
         return 0;
     }
@@ -202,10 +269,49 @@ function measureTextWidthForElement(el, text) {
     );
 }
 
+function getRequiredTextWidth(el) {
+    applyPdfLetterSpacing(el);
+    return Math.max(measureTextWidthForElement(el, editorText(el)), MIN_TEXT_WIDTH);
+}
+
+function getNextEditor(editor) {
+    const nextId = editor.dataset.nextEditorId;
+    if (!nextId) return null;
+    return document.querySelector(`.overlay-text[data-editor-id="${nextId}"]`);
+}
+
+function getPageRemainingWidth(el) {
+    const wrapper = el.parentElement;
+    if (!wrapper) return MIN_TEXT_WIDTH;
+
+    const currentLeft = Number(
+        el.dataset.dynamicLeftPx || el.dataset.leftPx || 0,
+    );
+    const pageWidthPx = Number(
+        el.dataset.pageWidthPx || wrapper.clientWidth || 0,
+    );
+
+    return Math.max(pageWidthPx - currentLeft - 2, MIN_TEXT_WIDTH);
+}
+
 function getMaxAllowedWidth(el) {
     const wrapper = el.parentElement;
     if (!wrapper) return MIN_TEXT_WIDTH;
-    return Math.max(wrapper.clientWidth - 2, MIN_TEXT_WIDTH);
+
+    const pushedNext = getNextEditor(el);
+
+    if (!pushedNext) {
+        return getPageRemainingWidth(el);
+    }
+
+    const currentLeft = Number(
+        el.dataset.dynamicLeftPx || el.dataset.leftPx || 0,
+    );
+    const nextLeft = Number(
+        pushedNext.dataset.dynamicLeftPx || pushedNext.dataset.leftPx || 0,
+    );
+
+    return Math.max(nextLeft - currentLeft, MIN_TEXT_WIDTH);
 }
 
 function fitsTextInBlock(el, candidateText) {
@@ -219,19 +325,17 @@ function fitsTextInBlock(el, candidateText) {
     return fits;
 }
 
-function resizeBlockToText(el) {
+function resizeBlockToText(el, options = {}) {
     applyPdfLetterSpacing(el);
 
     const text = editorText(el);
     const measured = measureTextWidthForElement(el, text);
-    const maxAllowed = getMaxAllowedWidth(el);
+    const maxAllowed = options.allowPush
+        ? getPageRemainingWidth(el)
+        : getMaxAllowedWidth(el);
     const finalWidth = Math.min(Math.max(measured, MIN_TEXT_WIDTH), maxAllowed);
     el.style.width = `${finalWidth}px`;
     return measured <= maxAllowed;
-}
-
-function editorHasChanges(editor) {
-    return normalize(editorText(editor)) !== normalize(editor.dataset.oldText);
 }
 
 function setEditorVisibility(editor, visible) {
@@ -258,10 +362,12 @@ function updateCoverGeometry(editor) {
             MIN_TEXT_WIDTH,
     );
     const maxWidth = Number(editor.dataset.maxWidth || targetWidth);
+    const editorLeft = Number.parseFloat(editor.style.left || "0") || 0;
     const textWidth = measureTextWidthForElement(editor, editorText(editor));
-    const coverLeft = -COVER_PAD_X;
+    const textRight = editorLeft + textWidth;
+    const coverLeft = Math.min(0, editorLeft) - COVER_PAD_X;
     const coverRight = Math.min(
-        Math.max(targetWidth, textWidth) + COVER_PAD_X,
+        Math.max(targetWidth, textRight) + COVER_PAD_X,
         maxWidth,
     );
     const wrapperHeight =
@@ -276,16 +382,18 @@ function updateCoverGeometry(editor) {
 function updateEditorVisualState(editor) {
     const wrapper = editor.parentElement;
     const changed = editorHasChanges(editor);
+    const moved = editorMoved(editor);
     const editing = document.activeElement === editor;
 
     editor.classList.toggle("changed", changed);
 
     if (wrapper) {
         wrapper.classList.toggle("changed", changed);
+        wrapper.classList.toggle("moved", moved);
         wrapper.classList.toggle("editing", editing);
     }
 
-    if (editing || changed) {
+    if (editing || changed || moved) {
         setEditorVisibility(editor, true);
     } else {
         setEditorVisibility(editor, false);
@@ -295,7 +403,156 @@ function updateEditorVisualState(editor) {
     updateCoverGeometry(editor);
 }
 
-function createOverlayDiv(unit, pageData) {
+function sameVisualLine(a, b) {
+    return (
+        Math.abs(Number(a.dataset.originY) - Number(b.dataset.originY)) < 2.5
+    );
+}
+
+function sameStyle(a, b) {
+    return (
+        (a.dataset.font || "") === (b.dataset.font || "") &&
+        (a.dataset.size || "") === (b.dataset.size || "") &&
+        (a.dataset.flags || "") === (b.dataset.flags || "") &&
+        (a.dataset.color || "") === (b.dataset.color || "")
+    );
+}
+
+function setDynamicLeft(editor, leftPx) {
+    const originalLeft = Number(editor.dataset.leftPx || 0);
+    editor.dataset.dynamicLeftPx = String(leftPx);
+    editor.style.left = `${leftPx - originalLeft}px`;
+}
+
+function resetChainFrom(editor) {
+    let current = getNextEditor(editor);
+    while (current) {
+        const originalLeft = Number(current.dataset.leftPx || 0);
+        setDynamicLeft(current, originalLeft);
+        if (!editorHasChanges(current) && document.activeElement !== current) {
+            current.style.width = `${current.dataset.originalWidth}px`;
+        }
+        current = getNextEditor(current);
+    }
+}
+
+function pushNextEditors(editor) {
+    const next = getNextEditor(editor);
+    if (!next) return true;
+
+    const currentLeft = Number(
+        editor.dataset.dynamicLeftPx || editor.dataset.leftPx || 0,
+    );
+    const currentWidth = Math.max(
+        parseFloat(editor.style.width || editor.dataset.originalWidth || "0"),
+        getRequiredTextWidth(editor),
+    );
+    const desiredNextLeft = currentLeft + currentWidth + 2;
+
+    const originalNextLeft = Number(next.dataset.leftPx || 0);
+    const appliedNextLeft = Math.max(desiredNextLeft, originalNextLeft);
+
+    const pageWidthPx = Number(next.dataset.pageWidthPx || 0);
+    const nextOwnWidth = Math.max(
+        parseFloat(next.style.width || next.dataset.originalWidth || "0"),
+        getRequiredTextWidth(next),
+    );
+    const nextMaxLeft =
+        pageWidthPx > 0 ? pageWidthPx - nextOwnWidth - 2 : appliedNextLeft;
+
+    if (appliedNextLeft > nextMaxLeft) {
+        return false;
+    }
+
+    setDynamicLeft(next, appliedNextLeft);
+
+    return pushNextEditors(next);
+}
+
+function recomputeFlowFrom(editor) {
+    resetChainFrom(editor);
+    return pushNextEditors(editor);
+}
+
+function updateChainVisuals(editor) {
+    let current = editor;
+    while (current) {
+        resizeBlockToText(current);
+        updateEditorVisualState(current);
+        current = getNextEditor(current);
+    }
+}
+
+function snapshotChain(editor) {
+    const snapshot = [];
+    let current = editor;
+    while (current) {
+        snapshot.push({
+            id: current.dataset.editorId,
+            text: editorText(current),
+            prevText: current.dataset.prevText,
+            width: current.style.width,
+            dynamicLeftPx: current.dataset.dynamicLeftPx,
+        });
+        current = getNextEditor(current);
+    }
+    return snapshot;
+}
+
+function restoreChain(snapshot) {
+    snapshot.forEach((item) => {
+        const editor = document.querySelector(
+            `.overlay-text[data-editor-id="${item.id}"]`,
+        );
+        if (!editor) return;
+
+        editor.textContent = item.text;
+        editor.dataset.prevText = item.prevText;
+        editor.style.width = item.width;
+        editor.dataset.dynamicLeftPx = item.dynamicLeftPx;
+
+        const originalLeft = Number(editor.dataset.leftPx || 0);
+        const dynamicLeft = Number(item.dynamicLeftPx || originalLeft);
+        editor.style.left = `${dynamicLeft - originalLeft}px`;
+    });
+
+    snapshot.forEach((item) => {
+        const editor = document.querySelector(
+            `.overlay-text[data-editor-id="${item.id}"]`,
+        );
+        if (!editor) return;
+
+        updateEditorVisualState(editor);
+    });
+}
+
+function tryApplyEditorChange(editor, nextText, options = {}) {
+    const snapshot = snapshotChain(editor);
+
+    editor.textContent = nextText;
+    const ownTextFits = resizeBlockToText(editor, { allowPush: true });
+
+    if (!ownTextFits && !options.allowOverflowRecovery) {
+        restoreChain(snapshot);
+        return false;
+    }
+
+    const ok = recomputeFlowFrom(editor);
+    if (!ok && !options.allowOverflowRecovery) {
+        restoreChain(snapshot);
+        return false;
+    }
+
+    if (!ok) {
+        resetChainFrom(editor);
+    }
+
+    editor.dataset.prevText = editorText(editor);
+    updateChainVisuals(editor);
+    return true;
+}
+
+function createOverlayDiv(unit, pageData, pageWidthPx) {
     const wrapper = document.createElement("div");
     wrapper.className = "overlay-wrapper";
 
@@ -307,17 +564,15 @@ function createOverlayDiv(unit, pageData) {
     editor.contentEditable = "true";
     editor.spellcheck = false;
     editor.textContent = unit.text;
+    editor.dataset.editorId = crypto.randomUUID();
 
     const left = unit.x0 * scale;
-
-    // Позиционирование от baseline, чтобы курсив в скобках совпадал лучше
     const top = (unit.originY - unit.size * 0.92) * scale;
 
     const targetWidth = Math.max((unit.x1 - unit.x0) * scale, MIN_TEXT_WIDTH);
     const baseWidth = Math.max(targetWidth + TEXT_WIDTH_PAD, 20);
     const baseHeight = Math.max(unit.size * scale * 1.35, 20);
-    const maxX = (unit.maxX ?? pageData.width) * scale;
-    const maxWidth = Math.max(maxX - left, baseWidth);
+    const maxWidth = Math.max(pageWidthPx - left - 2, baseWidth);
 
     wrapper.style.position = "absolute";
     wrapper.style.left = `${left}px`;
@@ -359,6 +614,7 @@ function createOverlayDiv(unit, pageData) {
     editor.dataset.x1 = unit.x1;
     editor.dataset.y1 = unit.y1;
     editor.dataset.maxX = unit.maxX ?? pageData.width;
+    editor.dataset.pageWidthPx = pageWidthPx;
 
     editor.dataset.font = unit.font || "";
     editor.dataset.size = unit.size;
@@ -372,11 +628,14 @@ function createOverlayDiv(unit, pageData) {
     editor.dataset.targetTextWidth = targetWidth;
     editor.dataset.maxWidth = maxWidth;
     editor.dataset.originY = unit.originY;
+    editor.dataset.leftPx = left;
+    editor.dataset.dynamicLeftPx = left;
 
     editor.addEventListener("focus", () => {
         wrapper.classList.add("editing");
         setEditorVisibility(editor, true);
         resizeBlockToText(editor);
+        recomputeFlowFrom(editor);
         updateEditorVisualState(editor);
     });
 
@@ -384,18 +643,22 @@ function createOverlayDiv(unit, pageData) {
         wrapper.classList.remove("editing");
         if (!editorHasChanges(editor)) {
             editor.style.width = `${editor.dataset.originalWidth}px`;
+            recomputeFlowFrom(editor);
         }
         updateEditorVisualState(editor);
     });
 
     editor.addEventListener("input", () => {
-        if (!fitsTextInBlock(editor, editorText(editor))) {
-            editor.textContent =
-                editor.dataset.prevText || editor.dataset.oldText || "";
+        const oldPrev = editor.dataset.prevText || editor.dataset.oldText || "";
+        const current = editorText(editor);
+
+        if (!tryApplyEditorChange(editor, current)) {
+            editor.textContent = oldPrev;
             placeCursorAtEnd(editor);
+            tryApplyEditorChange(editor, oldPrev);
+            return;
         }
 
-        editor.dataset.prevText = editorText(editor);
         updateEditorVisualState(editor);
     });
 
@@ -403,19 +666,41 @@ function createOverlayDiv(unit, pageData) {
         const inputType = e.inputType || "";
 
         if (
+            inputType === "insertParagraph" ||
+            inputType === "insertLineBreak"
+        ) {
+            e.preventDefault();
+            return;
+        }
+
+        if (
             inputType === "deleteContentBackward" ||
             inputType === "deleteContentForward" ||
             inputType === "deleteByCut" ||
             inputType === "deleteByDrag"
         ) {
-            return;
-        }
+            const currentText = editorText(editor);
+            const { start, end } = getSelectionOffsets(editor);
+            const direction =
+                inputType === "deleteContentForward" ? "forward" : "backward";
+            const deleted = buildDeletedText(currentText, start, end, direction);
 
-        if (
-            inputType === "insertParagraph" ||
-            inputType === "insertLineBreak"
-        ) {
             e.preventDefault();
+
+            if (deleted.text === currentText) {
+                setCursorOffset(editor, deleted.cursor);
+                return;
+            }
+
+            if (
+                tryApplyEditorChange(editor, deleted.text, {
+                    allowOverflowRecovery: true,
+                })
+            ) {
+                setCursorOffset(editor, deleted.cursor);
+                updateEditorVisualState(editor);
+            }
+
             return;
         }
 
@@ -439,6 +724,13 @@ function createOverlayDiv(unit, pageData) {
 
             incomingText = (incomingText || "").replace(/\r?\n/g, " ");
 
+            e.preventDefault();
+
+            if (!incomingText) {
+                setCursorOffset(editor, start);
+                return;
+            }
+
             const predictedText = buildPredictedText(
                 currentText,
                 incomingText,
@@ -446,14 +738,23 @@ function createOverlayDiv(unit, pageData) {
                 end,
             );
 
-            if (!fitsTextInBlock(editor, predictedText)) {
-                e.preventDefault();
-                placeCursorAtEnd(editor);
+            if (tryApplyEditorChange(editor, predictedText)) {
+                setCursorOffset(editor, start + incomingText.length);
+                updateEditorVisualState(editor);
+            } else {
+                setCursorOffset(editor, start);
             }
+
+            return;
         }
     });
 
-    wrapper.addEventListener("mousedown", () => {
+    wrapper.addEventListener("mousedown", (event) => {
+        if (event.target === editor) {
+            setEditorVisibility(editor, true);
+            return;
+        }
+
         if (document.activeElement !== editor) {
             setEditorVisibility(editor, true);
             requestAnimationFrame(() => {
@@ -467,6 +768,26 @@ function createOverlayDiv(unit, pageData) {
     wrapper.appendChild(editor);
     updateEditorVisualState(editor);
     return wrapper;
+}
+
+function linkEditorsOnPage(pageWrapper) {
+    const editors = Array.from(pageWrapper.querySelectorAll(".overlay-text"));
+
+    editors.sort((a, b) => {
+        const ay = Number(a.dataset.originY);
+        const by = Number(b.dataset.originY);
+        if (Math.abs(ay - by) > 2.5) return ay - by;
+        return Number(a.dataset.x0) - Number(b.dataset.x0);
+    });
+
+    for (let i = 0; i < editors.length - 1; i++) {
+        const current = editors[i];
+        const next = editors[i + 1];
+
+        if (!sameVisualLine(current, next)) continue;
+
+        current.dataset.nextEditorId = next.dataset.editorId;
+    }
 }
 
 async function openPdf() {
@@ -554,11 +875,15 @@ async function renderPdfWithOverlay(pdfUrl, pagesData) {
         const units = pageData?.units || [];
 
         for (const unit of units) {
-            overlayLayer.appendChild(createOverlayDiv(unit, pageData));
+            overlayLayer.appendChild(
+                createOverlayDiv(unit, pageData, viewport.width),
+            );
         }
 
         pageWrapper.appendChild(overlayLayer);
         viewer.appendChild(pageWrapper);
+
+        linkEditorsOnPage(pageWrapper);
     }
 
     resizeAllOverlayTexts();
@@ -567,11 +892,23 @@ async function renderPdfWithOverlay(pdfUrl, pagesData) {
 function collectChanges() {
     const editors = Array.from(document.querySelectorAll(".overlay-text"));
     const changes = [];
+
     for (const el of editors) {
         const oldText = el.dataset.oldText || "";
         const newText = editorText(el);
 
-        if (normalize(oldText) === normalize(newText)) {
+        const originalLeftPx = Number(el.dataset.leftPx || 0);
+        const dynamicLeftPx = Number(
+            el.dataset.dynamicLeftPx || originalLeftPx,
+        );
+        const currentWidthPx = parseFloat(
+            el.style.width || el.dataset.originalWidth || "0",
+        );
+
+        const moved = Math.abs(dynamicLeftPx - originalLeftPx) > 0.5;
+        const textChanged = normalize(oldText) !== normalize(newText);
+
+        if (!moved && !textChanged) {
             continue;
         }
 
@@ -583,12 +920,16 @@ function collectChanges() {
             y0: Number(el.dataset.y0),
             x1: Number(el.dataset.x1),
             y1: Number(el.dataset.y1),
-            maxX: Number(el.dataset.maxX),
+            maxX: Number(el.dataset.pageWidthPx) / scale - 2,
             font: el.dataset.font || "",
             size: Number(el.dataset.size),
             color: Number(el.dataset.color),
             flags: Number(el.dataset.flags),
             originY: Number(el.dataset.originY),
+
+            drawX: dynamicLeftPx / scale,
+            currentX1: (dynamicLeftPx + currentWidthPx) / scale,
+            movedOnly: moved && !textChanged,
         });
     }
 

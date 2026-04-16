@@ -77,6 +77,7 @@ input[type="file"] {
     position: relative;
     background: white;
     box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
+    overflow: hidden;
 }
 
 .pdf-canvas {
@@ -86,6 +87,7 @@ input[type="file"] {
 .overlay-layer {
     position: absolute;
     inset: 0;
+    overflow: hidden;
 }
 
 .overlay-wrapper {
@@ -110,7 +112,7 @@ input[type="file"] {
     color: #000;
     caret-color: #000;
     white-space: pre;
-    overflow: visible;
+    overflow: hidden;
     line-height: 1;
     margin: 0;
     padding: 0;

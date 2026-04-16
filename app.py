@@ -4,6 +4,9 @@ import fitz  # PyMuPDF
 import uuid
 import re
 import traceback
+import unicodedata
+import urllib.request
+import os
 
 app = Flask(__name__)
 
@@ -11,156 +14,132 @@ BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_FOLDER = BASE_DIR / "uploads"
 OUTPUT_FOLDER = BASE_DIR / "outputs"
 EXTRACTED_FONTS_FOLDER = BASE_DIR / "extracted_fonts"
+PROJECT_FONTS_FOLDER = BASE_DIR / "fonts"
+FONT_CACHE_FOLDER = BASE_DIR / ".font_cache"
 
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 OUTPUT_FOLDER.mkdir(exist_ok=True)
 EXTRACTED_FONTS_FOLDER.mkdir(exist_ok=True)
+PROJECT_FONTS_FOLDER.mkdir(exist_ok=True)
+FONT_CACHE_FOLDER.mkdir(exist_ok=True)
 
+BROWSER_SUPPORTED_FONT_EXTENSIONS = {"ttf", "otf", "woff", "woff2"}
 
-REGULAR_FALLBACK_FONT_CANDIDATES = (
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    "/Library/Fonts/Arial Unicode.ttf",
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/Library/Fonts/Arial.ttf",
-    "/System/Library/Fonts/Supplemental/STIXTwoText.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+# ---- Диакритика / нормализация ----
+
+PREFIX_ACCENT_MARKS = {
+    "\u00b4": "\u0301",  # acute: ´y -> ý
+    "\u02c7": "\u030c",  # caron: ˇs -> š
+    "\u02c6": "\u0302",  # circumflex: ˆo -> ô
+    "`": "\u0300",
+    "\u00a8": "\u0308",
+}
+PREFIX_ACCENT_RE = re.compile(
+    f"([{re.escape(''.join(PREFIX_ACCENT_MARKS))}])([A-Za-z\u0131])"
 )
+POSTFIX_CARON_RE = re.compile(r"([dltDLT])[\u2019']")
 
-ITALIC_FALLBACK_FONT_CANDIDATES = (
-    "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
-    "/System/Library/Fonts/Supplemental/STIXTwoText-Italic.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    "/Library/Fonts/Arial Unicode.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
-)
-
-FONT_FAMILY_FILE_CANDIDATES = {
-    "times": {
-        "regular": (
-            "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
-            "/Library/Fonts/Times New Roman.ttf",
-        ),
-        "bold": (
-            "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf",
-            "/Library/Fonts/Times New Roman Bold.ttf",
-        ),
-        "italic": (
-            "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
-            "/Library/Fonts/Times New Roman Italic.ttf",
-        ),
-        "bold_italic": (
-            "/System/Library/Fonts/Supplemental/Times New Roman Bold Italic.ttf",
-            "/Library/Fonts/Times New Roman Bold Italic.ttf",
-        ),
-    },
-    "arial": {
-        "regular": (
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/Library/Fonts/Arial.ttf",
-        ),
-        "bold": (
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-            "/Library/Fonts/Arial Bold.ttf",
-        ),
-        "italic": (
-            "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
-            "/Library/Fonts/Arial Italic.ttf",
-        ),
-        "bold_italic": (
-            "/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf",
-            "/Library/Fonts/Arial Bold Italic.ttf",
-        ),
-    },
-    "courier": {
-        "regular": (
-            "/System/Library/Fonts/Supplemental/Courier New.ttf",
-            "/Library/Fonts/Courier New.ttf",
-        ),
-        "bold": (
-            "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
-            "/Library/Fonts/Courier New Bold.ttf",
-        ),
-        "italic": (
-            "/System/Library/Fonts/Supplemental/Courier New Italic.ttf",
-            "/Library/Fonts/Courier New Italic.ttf",
-        ),
-        "bold_italic": (
-            "/System/Library/Fonts/Supplemental/Courier New Bold Italic.ttf",
-            "/Library/Fonts/Courier New Bold Italic.ttf",
-        ),
-    },
-    "georgia": {
-        "regular": (
-            "/System/Library/Fonts/Supplemental/Georgia.ttf",
-            "/Library/Fonts/Georgia.ttf",
-        ),
-        "bold": (
-            "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
-            "/Library/Fonts/Georgia Bold.ttf",
-        ),
-        "italic": (
-            "/System/Library/Fonts/Supplemental/Georgia Italic.ttf",
-            "/Library/Fonts/Georgia Italic.ttf",
-        ),
-        "bold_italic": (
-            "/System/Library/Fonts/Supplemental/Georgia Bold Italic.ttf",
-            "/Library/Fonts/Georgia Bold Italic.ttf",
-        ),
-    },
+# Для некоторых TeX-like шрифтов
+TEX_FONT_ACCENT_REPLACEMENTS = {
+    "á": "\u00b4a",
+    "Á": "\u00b4A",
+    "é": "\u00b4e",
+    "É": "\u00b4E",
+    "í": "\u00b4\u0131",
+    "Í": "\u00b4I",
+    "ó": "\u00b4o",
+    "Ó": "\u00b4O",
+    "ú": "\u00b4u",
+    "Ú": "\u00b4U",
+    "ý": "\u00b4y",
+    "Ý": "\u00b4Y",
+    "ĺ": "\u00b4l",
+    "Ĺ": "\u00b4L",
+    "ŕ": "\u00b4r",
+    "Ŕ": "\u00b4R",
+    "č": "\u02c7c",
+    "Č": "\u02c7C",
+    "ď": "d\u2019",
+    "Ď": "D\u2019",
+    "ľ": "l\u2019",
+    "Ľ": "L\u2019",
+    "ň": "\u02c7n",
+    "Ň": "\u02c7N",
+    "š": "\u02c7s",
+    "Š": "\u02c7S",
+    "ť": "t\u2019",
+    "Ť": "T\u2019",
+    "ž": "\u02c7z",
+    "Ž": "\u02c7Z",
+    "ô": "\u02c6o",
+    "Ô": "\u02c6O",
+    "ä": "\u00a8a",
+    "Ä": "\u00a8A",
 }
 
 
-def first_existing_font(candidates):
-    for font_path in candidates:
-        path = Path(font_path)
-        if path.exists():
-            return path
-    return None
+def normalize_pdf_unicode_text(value: str) -> str:
+    text = (value or "").replace("\u00a0", " ")
+
+    def compose_prefix_accent(match):
+        accent, char = match.groups()
+        if char == "\u0131":
+            char = "i"
+        return unicodedata.normalize("NFC", char + PREFIX_ACCENT_MARKS[accent])
+
+    def compose_postfix_caron(match):
+        return unicodedata.normalize("NFC", match.group(1) + "\u030c")
+
+    text = PREFIX_ACCENT_RE.sub(compose_prefix_accent, text)
+    text = POSTFIX_CARON_RE.sub(compose_postfix_caron, text)
+
+    return unicodedata.normalize("NFC", text)
 
 
-def font_supports_text(font_path, text):
-    try:
-        font = fitz.Font(fontfile=str(font_path))
-    except Exception:
-        return False
-
-    return font_object_supports_text(font, text)
+def normalize_text(value: str) -> str:
+    return normalize_pdf_unicode_text(value).strip()
 
 
-def font_object_supports_text(font_obj, text):
-    for char in text or "":
-        if char.isspace():
-            continue
-        try:
-            if not font_obj.has_glyph(ord(char)):
-                return False
-        except Exception:
-            return False
-
-    return True
+def clean_font_name(name: str) -> str:
+    return name.split("+", 1)[-1] if name else ""
 
 
-def first_font_supporting_text(candidates, text):
-    for font_path in candidates:
-        path = Path(font_path)
-        if path.exists() and font_supports_text(path, text):
-            return path
-
-    return first_existing_font(candidates)
+def slugify_font_name(name: str) -> str:
+    cleaned = clean_font_name(name)
+    cleaned = re.sub(r"[^a-zA-Z0-9_\-]+", "_", cleaned)
+    return cleaned.strip("_") or f"font_{uuid.uuid4().hex[:8]}"
 
 
-def default_fallback_font(text=""):
-    return first_font_supporting_text(REGULAR_FALLBACK_FONT_CANDIDATES, text)
+def int_rgb_to_tuple(color_int: int):
+    red = (color_int >> 16) & 255
+    green = (color_int >> 8) & 255
+    blue = color_int & 255
+    return red / 255, green / 255, blue / 255
 
 
-def default_italic_fallback_font(text=""):
-    return first_font_supporting_text(ITALIC_FALLBACK_FONT_CANDIDATES, text)
+# ---- Определение стиля / семейства ----
+
+def font_traits(font_name, flags=0):
+    name = clean_font_name(font_name).lower()
+    flags = int(flags or 0)
+
+    is_italic = (
+        "italic" in name
+        or "oblique" in name
+        or "cmti" in name
+        or bool(flags & 2)
+    )
+    is_bold = (
+        "bold" in name
+        or "cmbx" in name
+        or bool(flags & 16)
+    )
+    return is_bold, is_italic
 
 
 def font_style_key(is_bold, is_italic):
     if is_bold and is_italic:
-        return "bold_italic"
+        return "bolditalic"
     if is_bold:
         return "bold"
     if is_italic:
@@ -168,142 +147,269 @@ def font_style_key(is_bold, is_italic):
     return "regular"
 
 
-def fallback_style_order(is_bold, is_italic):
-    requested = font_style_key(is_bold, is_italic)
-    order = [requested]
+def is_tex_like_font(font_name):
+    name = clean_font_name(font_name).lower()
+    return (
+        name.startswith("cm")
+        or name.startswith("lm")
+        or "computer modern" in name
+        or "latinmodern" in name
+    )
 
-    for style in ("regular", "bold", "italic", "bold_italic"):
-        if style not in order:
-            order.append(style)
 
-    return order
+def encode_text_for_original_font(font_name, text):
+    text = normalize_pdf_unicode_text(text)
+    if not is_tex_like_font(font_name):
+        return text
+    return "".join(TEX_FONT_ACCENT_REPLACEMENTS.get(ch, ch) for ch in text)
 
 
-def font_family_key(pdf_font_name):
-    name = clean_font_name(pdf_font_name).lower()
+def classify_font_family(font_name):
+    name = clean_font_name(font_name).lower()
 
-    if "times" in name:
-        return "times"
-    if "arial" in name or "helvetica" in name:
-        return "arial"
-    if "courier" in name:
-        return "courier"
-    if "georgia" in name:
-        return "georgia"
+    if (
+        is_tex_like_font(name)
+        or "times" in name
+        or "georgia" in name
+        or "serif" in name
+        or "stix" in name
+    ):
+        return "serif"
+
+    if "courier" in name or "mono" in name:
+        return "mono"
+
+    if "arial" in name or "helvetica" in name or "calibri" in name or "sans" in name:
+        return "sans"
+
+    return "serif"
+
+
+def browser_safe_font_name(pdf_font_name):
+    family = classify_font_family(pdf_font_name)
+    if family == "mono":
+        return "Courier New, Courier, monospace"
+    if family == "sans":
+        return "Arial, Helvetica, sans-serif"
+    return "Times New Roman, Times, serif"
+
+
+# ---- Проектные / кэшированные fallback-шрифты ----
+
+PROJECT_FONT_FILES = {
+    "serif": {
+        "regular": "serif-regular.ttf",
+        "italic": "serif-italic.ttf",
+        "bold": "serif-bold.ttf",
+        "bolditalic": "serif-bolditalic.ttf",
+    },
+    "sans": {
+        "regular": "sans-regular.ttf",
+        "italic": "sans-italic.ttf",
+        "bold": "sans-bold.ttf",
+        "bolditalic": "sans-bolditalic.ttf",
+    },
+    "mono": {
+        "regular": "mono-regular.ttf",
+        "italic": "mono-italic.ttf",
+        "bold": "mono-bold.ttf",
+        "bolditalic": "mono-bolditalic.ttf",
+    },
+}
+
+# Можно передать URL через env, чтобы сервер сам скачал шрифты в кэш
+# Например:
+# PDFEDIT_SERIF_REGULAR_URL
+# PDFEDIT_SERIF_ITALIC_URL
+# PDFEDIT_SERIF_BOLD_URL
+# PDFEDIT_SERIF_BOLDITALIC_URL
+def env_font_url(family: str, style: str) -> str | None:
+    key = f"PDFEDIT_{family.upper()}_{style.upper()}_URL"
+    return os.getenv(key)
+
+
+def get_project_font_path(family: str, style: str) -> Path:
+    filename = PROJECT_FONT_FILES[family][style]
+    return PROJECT_FONTS_FOLDER / filename
+
+
+def get_cached_font_path(family: str, style: str) -> Path:
+    filename = PROJECT_FONT_FILES[family][style]
+    return FONT_CACHE_FOLDER / filename
+
+
+def ensure_cached_font(family: str, style: str) -> Path | None:
+    cached = get_cached_font_path(family, style)
+    if cached.exists() and cached.stat().st_size > 0:
+        return cached
+
+    url = env_font_url(family, style)
+    if not url:
+        return None
+
+    try:
+        urllib.request.urlretrieve(url, cached)
+        if cached.exists() and cached.stat().st_size > 0:
+            return cached
+    except Exception:
+        pass
 
     return None
 
 
-def matching_system_font_candidates(pdf_font_name, is_bold, is_italic):
-    family_key = font_family_key(pdf_font_name)
-    if family_key is None:
-        return []
+def resolve_deployed_font(family: str, style: str) -> Path | None:
+    # 1) шрифт из проекта
+    project_font = get_project_font_path(family, style)
+    if project_font.exists() and project_font.stat().st_size > 0:
+        return project_font
 
-    family = FONT_FAMILY_FILE_CANDIDATES[family_key]
+    # 2) кэшированный / скачанный шрифт
+    cached_font = ensure_cached_font(family, style)
+    if cached_font and cached_font.exists():
+        return cached_font
+
+    return None
+
+
+def deployed_font_candidates(font_name: str, is_bold: bool, is_italic: bool):
+    family = classify_font_family(font_name)
+    style = font_style_key(is_bold, is_italic)
+
+    ordered_styles = [style]
+    for extra in ("regular", "italic", "bold", "bolditalic"):
+        if extra not in ordered_styles:
+            ordered_styles.append(extra)
+
     candidates = []
+    for st in ordered_styles:
+        path = resolve_deployed_font(family, st)
+        if path is not None:
+            candidates.append(path)
 
-    for style in fallback_style_order(is_bold, is_italic):
-        candidates.extend(family.get(style, ()))
+    # если для нужного family нет ничего — попробуем serif как универсальный fallback
+    if family != "serif":
+        for st in ordered_styles:
+            path = resolve_deployed_font("serif", st)
+            if path is not None and path not in candidates:
+                candidates.append(path)
 
     return candidates
 
 
-def select_font_for_replacement(
-    doc,
-    page,
-    span,
-    new_text,
-    fallback_font=None,
-    italic_fallback_font=None,
-):
-    font_name = span.get("font", "")
-    flags = int(span.get("flags", 0))
-    font_name_lower = font_name.lower()
-    is_italic = "italic" in font_name_lower or "oblique" in font_name_lower or bool(flags & 2)
-    is_bold = "bold" in font_name_lower or bool(flags & 16)
+# ---- Работа со шрифтами PyMuPDF ----
 
-    for font_path in matching_system_font_candidates(font_name, is_bold, is_italic):
-        path = Path(font_path)
-        if not path.exists():
-            continue
-
-        try:
-            font_obj = fitz.Font(fontfile=str(path))
-        except Exception:
-            continue
-
-        if font_object_supports_text(font_obj, new_text):
-            return {
-                "font_obj": font_obj,
-                "font_file": str(path),
-            }
-
-    original_font_name, original_font_buffer = find_font_data(doc, page, font_name)
-    if original_font_buffer is not None:
-        font_obj = create_font_object_from_buffer(original_font_buffer)
-        if font_obj is not None and font_object_supports_text(font_obj, new_text):
-            return {
-                "font_obj": font_obj,
-                "font_buffer": original_font_buffer,
-                "font_resource_name": original_font_name or f"ORIG_{uuid.uuid4().hex[:8]}",
-            }
-
-    if is_italic:
-        fallback_path = default_italic_fallback_font(new_text) or italic_fallback_font
-    else:
-        fallback_path = default_fallback_font(new_text) or fallback_font
-
-    if fallback_path is None:
-        return None
-
+def create_font_object_from_buffer(font_buffer):
     try:
-        font_obj = fitz.Font(fontfile=str(fallback_path))
+        return fitz.Font(fontbuffer=font_buffer)
     except Exception:
         return None
 
+
+def create_font_object_from_file(font_path):
+    try:
+        return fitz.Font(fontfile=str(font_path))
+    except Exception:
+        return None
+
+
+def font_object_supports_text(font_obj, text):
+    for ch in text or "":
+        if ch.isspace():
+            continue
+        try:
+            if not font_obj.has_glyph(ord(ch)):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def font_supports_text(font_path, text):
+    font_obj = create_font_object_from_file(font_path)
+    if font_obj is None:
+        return False
+    return font_object_supports_text(font_obj, text)
+
+
+def text_fits_single_line(font_obj, text, fontsize, width_limit):
+    if font_obj is None:
+        return False
+    try:
+        text_width = font_obj.text_length(text, fontsize=fontsize)
+        return text_width <= max(width_limit - 1.5, 1)
+    except Exception:
+        return False
+
+
+# ---- Извлечение шрифтов для фронта ----
+
+def extract_page_fonts(doc, page):
+    font_map = {}
+
+    for font in page.get_fonts(full=True):
+        try:
+            xref = font[0]
+            base_font = clean_font_name(font[3] if len(font) > 3 else "")
+            if not base_font:
+                continue
+
+            extracted = doc.extract_font(xref)
+            ext = (extracted[1] or "").lower()
+            font_buffer = extracted[3]
+            safe_name = slugify_font_name(base_font)
+
+            if not font_buffer or ext not in BROWSER_SUPPORTED_FONT_EXTENSIONS:
+                font_map[base_font.lower()] = {
+                    "webFontFamily": None,
+                    "webFontUrl": None,
+                    "fontStyle": "normal",
+                    "fontWeight": "400",
+                    "extracted": False,
+                }
+                continue
+
+            filename = f"{safe_name}.{ext}"
+            out_path = EXTRACTED_FONTS_FOLDER / filename
+            if not out_path.exists():
+                with open(out_path, "wb") as f:
+                    f.write(font_buffer)
+
+            is_bold, is_italic = font_traits(base_font)
+
+            font_map[base_font.lower()] = {
+                "webFontFamily": safe_name,
+                "webFontUrl": f"/extracted_fonts/{filename}",
+                "fontStyle": "italic" if is_italic else "normal",
+                "fontWeight": "700" if is_bold else "400",
+                "extracted": True,
+            }
+        except Exception:
+            continue
+
+    return font_map
+
+
+def find_best_web_font(font_name, page_font_map):
+    cleaned = clean_font_name(font_name).lower()
+
+    if cleaned in page_font_map and page_font_map[cleaned]["extracted"]:
+        return page_font_map[cleaned]
+
+    for key, value in page_font_map.items():
+        if cleaned == key or cleaned in key or key in cleaned:
+            if value["extracted"]:
+                return value
+
     return {
-        "font_obj": font_obj,
-        "font_file": str(fallback_path),
+        "webFontFamily": None,
+        "webFontUrl": None,
+        "fontStyle": "normal",
+        "fontWeight": "400",
+        "extracted": False,
     }
 
 
-def int_rgb_to_tuple(color_int):
-    red = (color_int >> 16) & 255
-    green = (color_int >> 8) & 255
-    blue = color_int & 255
-    return red / 255, green / 255, blue / 255
-
-
-def clean_font_name(name):
-    return name.split("+", 1)[-1] if name else ""
-
-
-def normalize_text(value):
-    return (value or "").replace("\u00a0", " ").strip()
-
-
-def slugify_font_name(name):
-    cleaned = clean_font_name(name)
-    cleaned = re.sub(r"[^a-zA-Z0-9_\-]+", "_", cleaned)
-    return cleaned.strip("_") or f"font_{uuid.uuid4().hex[:8]}"
-
-
-def browser_safe_font_name(pdf_font_name):
-    name = clean_font_name(pdf_font_name).lower()
-
-    if "times" in name:
-        return "Times New Roman, Times, serif"
-    if "arial" in name or "helvetica" in name:
-        return "Arial, Helvetica, sans-serif"
-    if "courier" in name:
-        return "Courier New, Courier, monospace"
-    if "calibri" in name:
-        return "Calibri, Arial, sans-serif"
-    if "georgia" in name:
-        return "Georgia, serif"
-
-    return "Times New Roman, serif"
-
+# ---- Разбиение текста на editable units ----
 
 def spans_have_same_style(a, b):
     if clean_font_name(a.get("font", "")).lower() != clean_font_name(b.get("font", "")).lower():
@@ -326,71 +432,11 @@ def spans_are_close(a, b, max_gap=3.0):
     return gap <= max_gap
 
 
-def extract_page_fonts(doc, page):
-    font_map = {}
-
-    for font in page.get_fonts(full=True):
-        try:
-            xref = font[0]
-            base_font = clean_font_name(font[3] if len(font) > 3 else "")
-            if not base_font:
-                continue
-
-            safe_name = slugify_font_name(base_font)
-            extracted = doc.extract_font(xref)
-            ext = extracted[1]
-            font_buffer = extracted[3]
-
-            if not font_buffer or not ext:
-                font_map[base_font.lower()] = {
-                    "webFontFamily": None,
-                    "webFontUrl": None,
-                    "extracted": False,
-                }
-                continue
-
-            filename = f"{safe_name}.{ext}"
-            out_path = EXTRACTED_FONTS_FOLDER / filename
-
-            if not out_path.exists():
-                with open(out_path, "wb") as f:
-                    f.write(font_buffer)
-
-            font_map[base_font.lower()] = {
-                "webFontFamily": safe_name,
-                "webFontUrl": f"/extracted_fonts/{filename}",
-                "extracted": True,
-            }
-
-        except Exception:
-            continue
-
-    return font_map
-
-
-def find_best_web_font(font_name, page_font_map):
-    cleaned = clean_font_name(font_name).lower()
-
-    if cleaned in page_font_map and page_font_map[cleaned]["extracted"]:
-        return page_font_map[cleaned]
-
-    for key, value in page_font_map.items():
-        if cleaned == key or cleaned in key or key in cleaned:
-            if value["extracted"]:
-                return value
-
-    return {
-        "webFontFamily": None,
-        "webFontUrl": None,
-        "extracted": False,
-    }
-
-
 def build_unit_from_spans(page_index, spans, page_font_map):
     if not spans:
         return None
 
-    full_text = "".join(span.get("text", "") for span in spans)
+    full_text = normalize_pdf_unicode_text("".join(span.get("text", "") for span in spans))
     if not normalize_text(full_text):
         return None
 
@@ -406,19 +452,7 @@ def build_unit_from_spans(page_index, spans, page_font_map):
 
     font_name = dominant_span.get("font", "")
     flags = dominant_span.get("flags", 0)
-    font_name_lower = font_name.lower()
-
-    is_italic = (
-        "italic" in font_name_lower
-        or "oblique" in font_name_lower
-        or bool(flags & 2)
-    )
-
-    is_bold = (
-        "bold" in font_name_lower
-        or bool(flags & 16)
-    )
-
+    is_bold, is_italic = font_traits(font_name, flags)
     web_font_info = find_best_web_font(font_name, page_font_map)
 
     return {
@@ -434,6 +468,8 @@ def build_unit_from_spans(page_index, spans, page_font_map):
         "browserFont": browser_safe_font_name(font_name),
         "webFontFamily": web_font_info["webFontFamily"],
         "webFontUrl": web_font_info["webFontUrl"],
+        "webFontStyle": web_font_info["fontStyle"],
+        "webFontWeight": web_font_info["fontWeight"],
         "size": dominant_span.get("size", 12),
         "color": dominant_span.get("color", 0),
         "flags": flags,
@@ -505,12 +541,19 @@ def extract_pdf_data(pdf_path):
 
         for unit in units:
             if unit["webFontFamily"] and unit["webFontUrl"]:
-                key = (unit["webFontFamily"], unit["webFontUrl"])
+                key = (
+                    unit["webFontFamily"],
+                    unit["webFontUrl"],
+                    unit["webFontStyle"],
+                    unit["webFontWeight"],
+                )
                 if key not in seen_font_families:
                     seen_font_families.add(key)
                     font_faces.append({
                         "fontFamily": unit["webFontFamily"],
                         "url": unit["webFontUrl"],
+                        "fontStyle": unit["webFontStyle"],
+                        "fontWeight": unit["webFontWeight"],
                     })
 
         pages_result.append({
@@ -523,6 +566,8 @@ def extract_pdf_data(pdf_path):
     doc.close()
     return pages_result, font_faces
 
+
+# ---- Сохранение обратно в PDF ----
 
 def find_span_for_rect(page, rect):
     text = page.get_text("dict")
@@ -538,7 +583,7 @@ def find_span_for_rect(page, rect):
                 if area <= 0:
                     continue
 
-                text_weight = sum(char.isalnum() for char in span.get("text", ""))
+                text_weight = sum(ch.isalnum() for ch in span.get("text", ""))
                 score = area * max(text_weight, 1)
 
                 if score > best_score:
@@ -549,56 +594,61 @@ def find_span_for_rect(page, rect):
 
 
 def find_font_data(doc, page, span_font_name):
-    """
-    Try to match the span font to a real page font resource.
-    Returns:
-      (font_name_for_page_insert_font, font_buffer_or_none)
-    """
     wanted = clean_font_name(span_font_name).lower()
 
     for font in page.get_fonts(full=True):
         xref = font[0]
         base_font = clean_font_name(font[3] if len(font) > 3 else "").lower()
-        resource_name = font[4] if len(font) > 4 else "helv"
 
         if base_font == wanted or wanted in base_font or base_font in wanted:
             try:
                 extracted = doc.extract_font(xref)
                 font_buffer = extracted[3]
                 if font_buffer:
-                    return "REPLFONT", font_buffer
+                    return font_buffer
             except Exception:
                 pass
 
-            return resource_name or "helv", None
-
-    return None, None
+    return None
 
 
-def create_font_object_from_buffer(font_buffer):
-    try:
-        return fitz.Font(fontbuffer=font_buffer)
-    except Exception:
-        return None
+def select_font_for_replacement(doc, page, span, new_text):
+    """
+    Порядок:
+    1. оригинальный embedded font PDF, если он умеет новый текст
+    2. проектный / скачанный fallback по семейству+стилю
+    """
+    original_font_name = span.get("font", "")
+    flags = int(span.get("flags", 0))
+    is_bold, is_italic = font_traits(original_font_name, flags)
 
+    candidates = []
 
-def create_font_object_from_file(font_path):
-    try:
-        return fitz.Font(fontfile=str(font_path))
-    except Exception:
-        return None
+    # 1) оригинальный embedded font
+    original_buffer = find_font_data(doc, page, original_font_name)
+    if original_buffer is not None:
+        encoded_text = encode_text_for_original_font(original_font_name, new_text)
+        font_obj = create_font_object_from_buffer(original_buffer)
+        if font_obj is not None and font_object_supports_text(font_obj, encoded_text):
+            candidates.append({
+                "kind": "buffer",
+                "font_obj": font_obj,
+                "font_buffer": original_buffer,
+                "text": encoded_text,
+            })
 
+    # 2) fallback из приложения / кэша
+    for font_path in deployed_font_candidates(original_font_name, is_bold, is_italic):
+        font_obj = create_font_object_from_file(font_path)
+        if font_obj is not None and font_object_supports_text(font_obj, new_text):
+            candidates.append({
+                "kind": "file",
+                "font_obj": font_obj,
+                "font_file": str(font_path),
+                "text": new_text,
+            })
 
-def text_fits_single_line(font_obj, text, fontsize, width_limit):
-    if font_obj is None:
-        return False
-
-    try:
-        text_width = font_obj.text_length(text, fontsize=fontsize)
-        # небольшой запас на округление и визуальную погрешность
-        return text_width <= max(width_limit - 1.5, 1)
-    except Exception:
-        return False
+    return candidates
 
 
 def replace_item_keep_style(
@@ -607,8 +657,6 @@ def replace_item_keep_style(
     rect,
     new_text,
     max_x=None,
-    fallback_font=None,
-    italic_fallback_font=None,
     background=(1, 1, 1),
 ):
     span = find_span_for_rect(page, rect)
@@ -617,17 +665,6 @@ def replace_item_keep_style(
 
     font_size = float(span.get("size", 12))
     color = int_rgb_to_tuple(span.get("color", 0))
-
-    font_choice = select_font_for_replacement(
-        doc=doc,
-        page=page,
-        span=span,
-        new_text=new_text,
-        fallback_font=fallback_font,
-        italic_fallback_font=italic_fallback_font,
-    )
-    if font_choice is None:
-        return False
 
     redraw_rect = fitz.Rect(rect)
     redraw_rect.y0 -= font_size * 0.20
@@ -639,27 +676,29 @@ def replace_item_keep_style(
 
     baseline_y = span.get("origin", [redraw_rect.x0, redraw_rect.y1])[1]
 
-    font_obj = font_choice["font_obj"]
+    candidates = select_font_for_replacement(doc, page, span, new_text)
+    if not candidates:
+        return False
 
-    # Подбираем размер, чтобы влезло
+    chosen = None
     chosen_size = font_size
-    fitted = False
 
-    for _ in range(12):
-        try:
-            text_width = font_obj.text_length(new_text, fontsize=chosen_size)
-            if text_width <= max(available_width - 1.5, 1):
-                fitted = True
+    for candidate in candidates:
+        test_size = font_size
+        for _ in range(12):
+            if text_fits_single_line(candidate["font_obj"], candidate["text"], test_size, available_width):
+                chosen = candidate
+                chosen_size = test_size
                 break
-        except Exception:
-            return False
 
-        chosen_size -= 0.5
-        if chosen_size < 5:
+            test_size -= 0.5
+            if test_size < 5:
+                break
+
+        if chosen is not None:
             break
 
-    # Не влезает — ничего не удаляем
-    if not fitted:
+    if chosen is None:
         return False
 
     # Только теперь удаляем старый текст
@@ -669,17 +708,17 @@ def replace_item_keep_style(
     except Exception:
         page.draw_rect(redraw_rect, color=background, fill=background, overlay=True)
 
-    font_name = f"FALLBACK_{uuid.uuid4().hex[:8]}"
-
     try:
-        if "font_buffer" in font_choice:
-            page.insert_font(fontname=font_name, fontbuffer=font_choice["font_buffer"])
+        if chosen["kind"] == "buffer":
+            font_name = f"ORIG_{uuid.uuid4().hex[:8]}"
+            page.insert_font(fontname=font_name, fontbuffer=chosen["font_buffer"])
         else:
-            page.insert_font(fontname=font_name, fontfile=font_choice["font_file"])
+            font_name = f"FALLBACK_{uuid.uuid4().hex[:8]}"
+            page.insert_font(fontname=font_name, fontfile=chosen["font_file"])
 
         page.insert_text(
             fitz.Point(redraw_rect.x0, baseline_y),
-            new_text,
+            chosen["text"],
             fontname=font_name,
             fontsize=chosen_size,
             color=color,
@@ -688,6 +727,9 @@ def replace_item_keep_style(
         return True
     except Exception:
         return False
+
+
+# ---- Flask routes ----
 
 @app.route("/")
 def index():
@@ -711,6 +753,7 @@ def upload():
     try:
         pages, font_faces = extract_pdf_data(pdf_path)
     except Exception as e:
+        traceback.print_exc()
         return jsonify({"error": f"Ошибка обработки PDF: {e}"}), 500
 
     return jsonify({
@@ -740,15 +783,12 @@ def save():
     output_name = f"edited_{filename}"
     output_path = OUTPUT_FOLDER / output_name
 
-    fallback_font = default_fallback_font()
-    italic_fallback_font = default_italic_fallback_font()
-
     try:
         doc = fitz.open(input_path)
 
         for change in changes:
-            new_text = change.get("newText", "")
-            old_text = change.get("oldText", "")
+            new_text = normalize_pdf_unicode_text(change.get("newText", ""))
+            old_text = normalize_pdf_unicode_text(change.get("oldText", ""))
 
             if normalize_text(new_text) == normalize_text(old_text):
                 continue
@@ -773,8 +813,6 @@ def save():
                 rect=rect,
                 new_text=new_text,
                 max_x=max_x,
-                fallback_font=fallback_font,
-                italic_fallback_font=italic_fallback_font,
                 background=(1, 1, 1),
             )
 

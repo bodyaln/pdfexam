@@ -90,12 +90,13 @@ input[type="file"] {
 
 .overlay-wrapper {
     position: absolute;
-    overflow: hidden;
+    overflow: visible;
 }
 
 .overlay-cover {
     position: absolute;
     background: #ffffff;
+    pointer-events: none;
 }
 
 .overlay-text {
@@ -104,6 +105,7 @@ input[type="file"] {
     border: 1px solid transparent;
     background: transparent;
     color: #111;
+    caret-color: auto;
     white-space: nowrap;
     overflow: visible;
     line-height: 1.2;
@@ -112,10 +114,14 @@ input[type="file"] {
     display: inline-block;
 }
 
-.overlay-text:focus {
+.overlay-wrapper.editing .overlay-text {
     border: 1px dashed #2563eb;
 }
 
-.overlay-text.changed {
+.overlay-wrapper.changed .overlay-text {
     border: 1px dashed #16a34a;
+}
+
+.overlay-wrapper.editing.changed .overlay-text {
+    border: 1px dashed #2563eb;
 }

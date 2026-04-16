@@ -39,6 +39,8 @@ async function registerFontFaces(fontFaces) {
 @font-face {
   font-family: "${font.fontFamily}";
   src: url("${font.url}");
+  font-style: ${font.fontStyle || "normal"};
+  font-weight: ${font.fontWeight || "400"};
 }
 `;
         })
@@ -46,8 +48,17 @@ async function registerFontFaces(fontFaces) {
 
     styleTag.textContent = css;
 
-    if (document.fonts && document.fonts.ready) {
+    if (document.fonts) {
         try {
+            await Promise.all(
+                (fontFaces || []).map((font) => {
+                    const weight = font.fontWeight || "400";
+                    const style = font.fontStyle || "normal";
+                    return document.fonts.load(
+                        `${style} ${weight} 16px "${font.fontFamily}"`,
+                    );
+                }),
+            );
             await document.fonts.ready;
         } catch (e) {
             console.warn("Fonts ready wait failed", e);
@@ -129,6 +140,10 @@ function getTextMeasurer() {
 }
 
 function measureTextWidthForElement(el, text) {
+    return Math.ceil(measureRawTextWidthForElement(el, text)) + 10;
+}
+
+function measureRawTextWidthForElement(el, text) {
     const measurer = getTextMeasurer();
 
     measurer.style.fontFamily = el.style.fontFamily;
@@ -138,7 +153,7 @@ function measureTextWidthForElement(el, text) {
     measurer.style.lineHeight = el.style.lineHeight || "1.2";
     measurer.textContent = text || "";
 
-    return Math.ceil(measurer.getBoundingClientRect().width) + 10;
+    return measurer.getBoundingClientRect().width;
 }
 
 function resizeBlockToText(el) {
@@ -151,10 +166,151 @@ function resizeBlockToText(el) {
     return measuredWidth <= maxAllowedWidth;
 }
 
+function updateCoverWidth(editor) {
+    const wrapper = editor.parentElement;
+    const cover = wrapper?.querySelector(".overlay-cover");
+
+    if (!cover) return;
+
+    const changed = editorHasChanges(editor);
+    const editing = document.activeElement === editor;
+    const originalWidth = Number(editor.dataset.originalWidth || 8);
+    const maxWidth = Number(editor.dataset.maxWidth || originalWidth);
+
+    if (!changed && !editing) {
+        cover.style.width = `${originalWidth}px`;
+        return;
+    }
+
+    const measuredWidth = measureTextWidthForElement(editor, editor.innerText || "");
+    cover.style.width = `${Math.min(Math.max(measuredWidth, originalWidth), maxWidth)}px`;
+}
+
 function fitsTextInBlock(el, candidateText) {
     const measuredWidth = measureTextWidthForElement(el, candidateText);
     const maxAllowedWidth = getMaxAllowedWidth(el);
     return measuredWidth <= maxAllowedWidth;
+}
+
+function editorHasChanges(editor) {
+    return normalize(editor.innerText) !== normalize(editor.dataset.oldText);
+}
+
+function updateEditorVisualState(editor) {
+    const wrapper = editor.parentElement;
+    const changed = editorHasChanges(editor);
+    const editing = document.activeElement === editor;
+
+    editor.classList.toggle("changed", changed);
+
+    if (wrapper) {
+        wrapper.classList.toggle("changed", changed);
+        wrapper.classList.toggle("editing", editing);
+    }
+
+    updateCoverWidth(editor);
+}
+
+function getInlineLineKey(wrapper) {
+    const editor = wrapper.querySelector(".overlay-text");
+    const page = editor?.dataset.page || "0";
+    const y0 = Number(editor?.dataset.y0 || 0);
+    const y1 = Number(editor?.dataset.y1 || y0);
+    const midY = (y0 + y1) / 2;
+
+    return { page, midY };
+}
+
+function areSameVisualLine(a, b) {
+    return a.page === b.page && Math.abs(a.midY - b.midY) <= 3;
+}
+
+function shouldStitchInline(prevEditor, editor, originalGap) {
+    const prevText = prevEditor.innerText || "";
+    const text = editor.innerText || "";
+    const closeInPdf = originalGap <= 8 && originalGap >= -6;
+
+    if (!closeInPdf) return false;
+
+    return (
+        prevEditor.dataset.isItalic === "1" ||
+        editor.dataset.isItalic === "1" ||
+        prevText.endsWith("(") ||
+        prevText.endsWith(" ") ||
+        text.startsWith(")") ||
+        text.startsWith(",") ||
+        text.startsWith(".")
+    );
+}
+
+function alignInlineStyleRuns() {
+    const wrappers = Array.from(document.querySelectorAll(".overlay-wrapper"));
+    const lines = [];
+
+    wrappers.forEach((wrapper) => {
+        const editor = wrapper.querySelector(".overlay-text");
+        if (!editor) return;
+
+        const lineKey = getInlineLineKey(wrapper);
+        let line = lines.find((candidate) => areSameVisualLine(candidate, lineKey));
+
+        if (!line) {
+            line = { ...lineKey, wrappers: [] };
+            lines.push(line);
+        }
+
+        line.wrappers.push(wrapper);
+    });
+
+    lines.forEach((line) => {
+        line.wrappers.sort((a, b) => {
+            return Number(a.dataset.originalLeft) - Number(b.dataset.originalLeft);
+        });
+
+        const lineTop = Math.min(
+            ...line.wrappers.map((wrapper) => Number(wrapper.dataset.originalTop)),
+        );
+
+        let prevWrapper = null;
+
+        line.wrappers.forEach((wrapper) => {
+            const editor = wrapper.querySelector(".overlay-text");
+            const originalLeft = Number(wrapper.dataset.originalLeft);
+            const originalTop = Number(wrapper.dataset.originalTop);
+            const originalRight = Number(wrapper.dataset.originalRight);
+            const editing = document.activeElement === editor;
+            const changed = editorHasChanges(editor);
+            const keepCurrentPosition = editing || changed;
+            let visualLeft = originalLeft;
+
+            editor.style.top = `${lineTop - originalTop}px`;
+
+            if (keepCurrentPosition) {
+                visualLeft = Number(wrapper.dataset.visualLeft || originalLeft);
+            } else if (prevWrapper) {
+                const prevEditor = prevWrapper.querySelector(".overlay-text");
+                const prevOriginalRight = Number(prevWrapper.dataset.originalRight);
+                const originalGap = originalLeft - prevOriginalRight;
+
+                if (shouldStitchInline(prevEditor, editor, originalGap)) {
+                    const prevVisualRight = Number(prevWrapper.dataset.visualRight);
+                    const candidateLeft = prevVisualRight + Math.max(originalGap, 0);
+
+                    if (originalLeft - candidateLeft > 3) {
+                        visualLeft = candidateLeft;
+                    }
+                }
+            }
+
+            editor.style.left = `${visualLeft - originalLeft}px`;
+
+            wrapper.dataset.visualRight =
+                visualLeft + measureRawTextWidthForElement(editor, editor.innerText || "");
+            prevWrapper = wrapper;
+            wrapper.dataset.visualLeft = visualLeft;
+            wrapper.dataset.originalRight = originalRight;
+        });
+    });
 }
 
 function createOverlayDiv(unit, pageData) {
@@ -186,7 +342,10 @@ function createOverlayDiv(unit, pageData) {
     wrapper.style.top = `${top}px`;
     wrapper.style.width = `${coverWidth}px`;
     wrapper.style.height = `${baseHeight}px`;
-    wrapper.style.overflow = "hidden";
+    wrapper.style.overflow = "visible";
+    wrapper.dataset.originalLeft = left;
+    wrapper.dataset.originalTop = top;
+    wrapper.dataset.originalRight = unit.x1 * scale;
 
     cover.style.position = "absolute";
     cover.style.left = "0px";
@@ -203,8 +362,11 @@ function createOverlayDiv(unit, pageData) {
     editor.style.height = `${baseHeight}px`;
     editor.style.fontSize = `${unit.size * scale}px`;
 
-    editor.style.fontFamily =
-        unit.browserFont || "Arial Unicode MS, Arial, sans-serif";
+    if (unit.webFontFamily) {
+        editor.style.fontFamily = `"${unit.webFontFamily}", ${unit.browserFont || "serif"}`;
+    } else {
+        editor.style.fontFamily = unit.browserFont || "Arial Unicode MS, Arial, sans-serif";
+    }
 
     editor.style.fontStyle = unit.isItalic ? "italic" : "normal";
     editor.style.fontWeight = unit.isBold ? "bold" : "normal";
@@ -225,19 +387,29 @@ function createOverlayDiv(unit, pageData) {
     editor.dataset.prevText = unit.text;
     editor.dataset.isItalic = unit.isItalic ? "1" : "0";
     editor.dataset.isBold = unit.isBold ? "1" : "0";
+    editor.dataset.originalWidth = baseWidth;
+    editor.dataset.maxWidth = coverWidth;
 
-    resizeBlockToText(editor);
+    editor.style.width = `${baseWidth}px`;
     editor.addEventListener("focus", () => {
+        wrapper.classList.add("editing");
         resizeBlockToText(editor);
+        updateEditorVisualState(editor);
+        alignInlineStyleRuns();
+    });
+    editor.addEventListener("blur", () => {
+        wrapper.classList.remove("editing");
+        if (!editorHasChanges(editor)) {
+            editor.style.width = `${editor.dataset.originalWidth}px`;
+        }
+        updateEditorVisualState(editor);
+        alignInlineStyleRuns();
     });
     editor.addEventListener("input", () => {
         resizeBlockToText(editor);
         editor.dataset.prevText = editor.innerText;
-
-        const changed =
-            normalize(editor.innerText) !== normalize(editor.dataset.oldText);
-
-        editor.classList.toggle("changed", changed);
+        updateEditorVisualState(editor);
+        alignInlineStyleRuns();
     });
 
     editor.addEventListener("beforeinput", (e) => {
@@ -295,6 +467,7 @@ function createOverlayDiv(unit, pageData) {
 
     wrapper.appendChild(cover);
     wrapper.appendChild(editor);
+    updateEditorVisualState(editor);
     return wrapper;
 }
 async function uploadPdf() {
@@ -341,8 +514,14 @@ async function uploadPdf() {
 function resizeAllOverlayTexts() {
     const editors = document.querySelectorAll(".overlay-text");
     editors.forEach((editor) => {
-        resizeBlockToText(editor);
+        if (editorHasChanges(editor) || document.activeElement === editor) {
+            resizeBlockToText(editor);
+        } else {
+            editor.style.width = `${editor.dataset.originalWidth}px`;
+        }
+        updateEditorVisualState(editor);
     });
+    alignInlineStyleRuns();
 }
 async function renderPdfWithOverlay(pdfUrl, pagesData) {
     viewer.innerHTML = "";

@@ -182,7 +182,10 @@ function updateCoverWidth(editor) {
         return;
     }
 
-    const measuredWidth = measureTextWidthForElement(editor, editor.innerText || "");
+    const measuredWidth = measureTextWidthForElement(
+        editor,
+        editor.innerText || "",
+    );
     cover.style.width = `${Math.min(Math.max(measuredWidth, originalWidth), maxWidth)}px`;
 }
 
@@ -252,7 +255,9 @@ function alignInlineStyleRuns() {
         if (!editor) return;
 
         const lineKey = getInlineLineKey(wrapper);
-        let line = lines.find((candidate) => areSameVisualLine(candidate, lineKey));
+        let line = lines.find((candidate) =>
+            areSameVisualLine(candidate, lineKey),
+        );
 
         if (!line) {
             line = { ...lineKey, wrappers: [] };
@@ -264,11 +269,15 @@ function alignInlineStyleRuns() {
 
     lines.forEach((line) => {
         line.wrappers.sort((a, b) => {
-            return Number(a.dataset.originalLeft) - Number(b.dataset.originalLeft);
+            return (
+                Number(a.dataset.originalLeft) - Number(b.dataset.originalLeft)
+            );
         });
 
         const lineTop = Math.min(
-            ...line.wrappers.map((wrapper) => Number(wrapper.dataset.originalTop)),
+            ...line.wrappers.map((wrapper) =>
+                Number(wrapper.dataset.originalTop),
+            ),
         );
 
         let prevWrapper = null;
@@ -289,12 +298,17 @@ function alignInlineStyleRuns() {
                 visualLeft = Number(wrapper.dataset.visualLeft || originalLeft);
             } else if (prevWrapper) {
                 const prevEditor = prevWrapper.querySelector(".overlay-text");
-                const prevOriginalRight = Number(prevWrapper.dataset.originalRight);
+                const prevOriginalRight = Number(
+                    prevWrapper.dataset.originalRight,
+                );
                 const originalGap = originalLeft - prevOriginalRight;
 
                 if (shouldStitchInline(prevEditor, editor, originalGap)) {
-                    const prevVisualRight = Number(prevWrapper.dataset.visualRight);
-                    const candidateLeft = prevVisualRight + Math.max(originalGap, 0);
+                    const prevVisualRight = Number(
+                        prevWrapper.dataset.visualRight,
+                    );
+                    const candidateLeft =
+                        prevVisualRight + Math.max(originalGap, 0);
 
                     if (originalLeft - candidateLeft > 3) {
                         visualLeft = candidateLeft;
@@ -305,7 +319,8 @@ function alignInlineStyleRuns() {
             editor.style.left = `${visualLeft - originalLeft}px`;
 
             wrapper.dataset.visualRight =
-                visualLeft + measureRawTextWidthForElement(editor, editor.innerText || "");
+                visualLeft +
+                measureRawTextWidthForElement(editor, editor.innerText || "");
             prevWrapper = wrapper;
             wrapper.dataset.visualLeft = visualLeft;
             wrapper.dataset.originalRight = originalRight;
@@ -365,7 +380,8 @@ function createOverlayDiv(unit, pageData) {
     if (unit.webFontFamily) {
         editor.style.fontFamily = `"${unit.webFontFamily}", ${unit.browserFont || "serif"}`;
     } else {
-        editor.style.fontFamily = unit.browserFont || "Arial Unicode MS, Arial, sans-serif";
+        editor.style.fontFamily =
+            unit.browserFont || "Times New Roman, Times, serif";
     }
 
     editor.style.fontStyle = unit.isItalic ? "italic" : "normal";

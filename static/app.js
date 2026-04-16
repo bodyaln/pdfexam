@@ -7,13 +7,20 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
     "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
 const pdfFileInput = document.getElementById("pdfFile");
-const uploadBtn = document.getElementById("uploadBtn");
-const saveBtn = document.getElementById("saveBtn");
+const openBtn = document.getElementById("openBtn");
+const applyBtn = document.getElementById("applyBtn");
 const viewer = document.getElementById("viewer");
 const statusEl = document.getElementById("status");
 
-uploadBtn.addEventListener("click", uploadPdf);
-saveBtn.addEventListener("click", savePdf);
+const COVER_PAD_X = 2;
+const COVER_PAD_Y = 1;
+const TEXT_WIDTH_PAD = 4;
+const MIN_TEXT_WIDTH = 8;
+const MIN_LETTER_SPACING = -1.2;
+const MAX_LETTER_SPACING = 1.8;
+
+openBtn.addEventListener("click", openPdf);
+applyBtn.addEventListener("click", applyPdfChanges);
 
 function setStatus(text, isError = false) {
     statusEl.textContent = text;
@@ -21,47 +28,49 @@ function setStatus(text, isError = false) {
 }
 
 function normalize(text) {
-    return (text || "").replace(/\u00a0/g, " ").trim();
+    return (text || "")
+        .replace(/\u00a0/g, " ")
+        .replace(/\r/g, "")
+        .trim();
+}
+
+function editorText(el) {
+    return (el?.textContent || "").replace(/\r/g, "");
 }
 
 async function registerFontFaces(fontFaces) {
     let styleTag = document.getElementById("dynamic-font-faces");
-
     if (!styleTag) {
         styleTag = document.createElement("style");
         styleTag.id = "dynamic-font-faces";
         document.head.appendChild(styleTag);
     }
 
-    const css = (fontFaces || [])
-        .map((font) => {
-            return `
+    styleTag.textContent = (fontFaces || [])
+        .map(
+            (font) => `
 @font-face {
   font-family: "${font.fontFamily}";
   src: url("${font.url}");
   font-style: ${font.fontStyle || "normal"};
   font-weight: ${font.fontWeight || "400"};
 }
-`;
-        })
+`,
+        )
         .join("\n");
-
-    styleTag.textContent = css;
 
     if (document.fonts) {
         try {
             await Promise.all(
-                (fontFaces || []).map((font) => {
-                    const weight = font.fontWeight || "400";
-                    const style = font.fontStyle || "normal";
-                    return document.fonts.load(
-                        `${style} ${weight} 16px "${font.fontFamily}"`,
-                    );
-                }),
+                (fontFaces || []).map((font) =>
+                    document.fonts.load(
+                        `${font.fontStyle || "normal"} ${font.fontWeight || "400"} 16px "${font.fontFamily}"`,
+                    ),
+                ),
             );
             await document.fonts.ready;
         } catch (e) {
-            console.warn("Fonts ready wait failed", e);
+            console.warn("document.fonts.load failed", e);
         }
     }
 }
@@ -69,20 +78,17 @@ async function registerFontFaces(fontFaces) {
 function placeCursorAtEnd(el) {
     const range = document.createRange();
     const sel = window.getSelection();
-
     range.selectNodeContents(el);
     range.collapse(false);
-
     sel.removeAllRanges();
     sel.addRange(range);
 }
 
 function getSelectionOffsets(element) {
     const selection = window.getSelection();
-
     if (!selection || selection.rangeCount === 0) {
-        const textLength = element.innerText.length;
-        return { start: textLength, end: textLength };
+        const len = editorText(element).length;
+        return { start: len, end: len };
     }
 
     const range = selection.getRangeAt(0);
@@ -91,19 +97,19 @@ function getSelectionOffsets(element) {
         !element.contains(range.startContainer) ||
         !element.contains(range.endContainer)
     ) {
-        const textLength = element.innerText.length;
-        return { start: textLength, end: textLength };
+        const len = editorText(element).length;
+        return { start: len, end: len };
     }
 
-    const preStartRange = range.cloneRange();
-    preStartRange.selectNodeContents(element);
-    preStartRange.setEnd(range.startContainer, range.startOffset);
-    const start = preStartRange.toString().length;
+    const startRange = range.cloneRange();
+    startRange.selectNodeContents(element);
+    startRange.setEnd(range.startContainer, range.startOffset);
+    const start = startRange.toString().length;
 
-    const preEndRange = range.cloneRange();
-    preEndRange.selectNodeContents(element);
-    preEndRange.setEnd(range.endContainer, range.endOffset);
-    const end = preEndRange.toString().length;
+    const endRange = range.cloneRange();
+    endRange.selectNodeContents(element);
+    endRange.setEnd(range.endContainer, range.endOffset);
+    const end = endRange.toString().length;
 
     return { start, end };
 }
@@ -112,16 +118,12 @@ function buildPredictedText(currentText, insertText, start, end) {
     return currentText.slice(0, start) + insertText + currentText.slice(end);
 }
 
-function getMaxAllowedWidth(el) {
-    const wrapper = el.parentElement;
-    if (!wrapper) return 8;
-
-    return Math.max(wrapper.clientWidth - 2, 8);
+function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
 }
 
 function getTextMeasurer() {
     let measurer = document.getElementById("text-width-measurer");
-
     if (!measurer) {
         measurer = document.createElement("span");
         measurer.id = "text-width-measurer";
@@ -130,73 +132,145 @@ function getTextMeasurer() {
         measurer.style.top = "-99999px";
         measurer.style.visibility = "hidden";
         measurer.style.whiteSpace = "nowrap";
-        measurer.style.padding = "0";
-        measurer.style.margin = "0";
-        measurer.style.border = "0";
         document.body.appendChild(measurer);
     }
 
     return measurer;
 }
 
-function measureTextWidthForElement(el, text) {
-    return Math.ceil(measureRawTextWidthForElement(el, text)) + 10;
-}
-
 function measureRawTextWidthForElement(el, text) {
     const measurer = getTextMeasurer();
-
     measurer.style.fontFamily = el.style.fontFamily;
     measurer.style.fontSize = el.style.fontSize;
     measurer.style.fontStyle = el.style.fontStyle;
     measurer.style.fontWeight = el.style.fontWeight;
     measurer.style.lineHeight = el.style.lineHeight || "1.2";
+    measurer.style.letterSpacing = "0px";
     measurer.textContent = text || "";
-
     return measurer.getBoundingClientRect().width;
 }
 
-function resizeBlockToText(el) {
-    const text = el.innerText || "";
-    const measuredWidth = measureTextWidthForElement(el, text);
-    const maxAllowedWidth = getMaxAllowedWidth(el);
-    const finalWidth = Math.min(Math.max(measuredWidth, 8), maxAllowedWidth);
-
-    el.style.width = `${finalWidth}px`;
-    return measuredWidth <= maxAllowedWidth;
+function getCharCount(text) {
+    return Array.from(text || "").length;
 }
 
-function updateCoverWidth(editor) {
-    const wrapper = editor.parentElement;
-    const cover = wrapper?.querySelector(".overlay-cover");
+function calculatePdfLetterSpacing(el, text) {
+    const targetWidth = Number(
+        el.dataset.targetTextWidth ||
+            el.dataset.originalWidth ||
+            MIN_TEXT_WIDTH,
+    );
+    const rawWidth = measureRawTextWidthForElement(el, text);
+    const chars = getCharCount(text);
 
-    if (!cover) return;
-
-    const changed = editorHasChanges(editor);
-    const editing = document.activeElement === editor;
-    const originalWidth = Number(editor.dataset.originalWidth || 8);
-    const maxWidth = Number(editor.dataset.maxWidth || originalWidth);
-
-    if (!changed && !editing) {
-        cover.style.width = `${originalWidth}px`;
-        return;
+    if (chars < 2 || rawWidth <= 0 || targetWidth <= 0) {
+        return 0;
     }
 
-    const measuredWidth = measureTextWidthForElement(
-        editor,
-        editor.innerText || "",
+    const ratio = rawWidth / targetWidth;
+    if (ratio < 0.72 || ratio > 1.35) {
+        return 0;
+    }
+
+    return clamp(
+        (targetWidth - rawWidth) / (chars - 1),
+        MIN_LETTER_SPACING,
+        MAX_LETTER_SPACING,
     );
-    cover.style.width = `${Math.min(Math.max(measuredWidth, originalWidth), maxWidth)}px`;
+}
+
+function applyPdfLetterSpacing(el) {
+    const changed = editorHasChanges(el);
+    const editing = document.activeElement === el;
+
+    if (changed || editing) {
+        el.style.letterSpacing = "0px";
+        return 0;
+    }
+
+    const spacing = calculatePdfLetterSpacing(el, editorText(el));
+    el.style.letterSpacing = `${spacing}px`;
+    return spacing;
+}
+
+function measureTextWidthForElement(el, text) {
+    const rawWidth = measureRawTextWidthForElement(el, text);
+    const spacing = Number.parseFloat(el.style.letterSpacing || "0") || 0;
+    const chars = getCharCount(text);
+    return (
+        Math.ceil(rawWidth + spacing * Math.max(chars - 1, 0)) + TEXT_WIDTH_PAD
+    );
+}
+
+function getMaxAllowedWidth(el) {
+    const wrapper = el.parentElement;
+    if (!wrapper) return MIN_TEXT_WIDTH;
+    return Math.max(wrapper.clientWidth - 2, MIN_TEXT_WIDTH);
 }
 
 function fitsTextInBlock(el, candidateText) {
-    const measuredWidth = measureTextWidthForElement(el, candidateText);
-    const maxAllowedWidth = getMaxAllowedWidth(el);
-    return measuredWidth <= maxAllowedWidth;
+    const prevSpacing = el.style.letterSpacing;
+    el.style.letterSpacing = "0px";
+    const fits =
+        Math.ceil(measureRawTextWidthForElement(el, candidateText)) +
+            TEXT_WIDTH_PAD <=
+        getMaxAllowedWidth(el);
+    el.style.letterSpacing = prevSpacing;
+    return fits;
+}
+
+function resizeBlockToText(el) {
+    applyPdfLetterSpacing(el);
+
+    const text = editorText(el);
+    const measured = measureTextWidthForElement(el, text);
+    const maxAllowed = getMaxAllowedWidth(el);
+    const finalWidth = Math.min(Math.max(measured, MIN_TEXT_WIDTH), maxAllowed);
+    el.style.width = `${finalWidth}px`;
+    return measured <= maxAllowed;
 }
 
 function editorHasChanges(editor) {
-    return normalize(editor.innerText) !== normalize(editor.dataset.oldText);
+    return normalize(editorText(editor)) !== normalize(editor.dataset.oldText);
+}
+
+function setEditorVisibility(editor, visible) {
+    const wrapper = editor.parentElement;
+    const cover = wrapper?.querySelector(".overlay-cover");
+
+    if (visible) {
+        editor.classList.remove("overlay-hidden");
+        if (cover) cover.style.display = "block";
+    } else {
+        editor.classList.add("overlay-hidden");
+        if (cover) cover.style.display = "none";
+    }
+}
+
+function updateCoverGeometry(editor) {
+    const wrapper = editor.parentElement;
+    const cover = wrapper?.querySelector(".overlay-cover");
+    if (!cover) return;
+
+    const targetWidth = Number(
+        editor.dataset.targetTextWidth ||
+            editor.dataset.originalWidth ||
+            MIN_TEXT_WIDTH,
+    );
+    const maxWidth = Number(editor.dataset.maxWidth || targetWidth);
+    const textWidth = measureTextWidthForElement(editor, editorText(editor));
+    const coverLeft = -COVER_PAD_X;
+    const coverRight = Math.min(
+        Math.max(targetWidth, textWidth) + COVER_PAD_X,
+        maxWidth,
+    );
+    const wrapperHeight =
+        Number.parseFloat(wrapper.style.height || "0") || wrapper.clientHeight;
+
+    cover.style.left = `${coverLeft}px`;
+    cover.style.top = `${COVER_PAD_Y}px`;
+    cover.style.width = `${Math.max(coverRight - coverLeft, MIN_TEXT_WIDTH)}px`;
+    cover.style.height = `${Math.max(wrapperHeight - COVER_PAD_Y * 2, 1)}px`;
 }
 
 function updateEditorVisualState(editor) {
@@ -211,121 +285,14 @@ function updateEditorVisualState(editor) {
         wrapper.classList.toggle("editing", editing);
     }
 
-    updateCoverWidth(editor);
-}
+    if (editing || changed) {
+        setEditorVisibility(editor, true);
+    } else {
+        setEditorVisibility(editor, false);
+    }
 
-function getInlineLineKey(wrapper) {
-    const editor = wrapper.querySelector(".overlay-text");
-    const page = editor?.dataset.page || "0";
-    const y0 = Number(editor?.dataset.y0 || 0);
-    const y1 = Number(editor?.dataset.y1 || y0);
-    const midY = (y0 + y1) / 2;
-
-    return { page, midY };
-}
-
-function areSameVisualLine(a, b) {
-    return a.page === b.page && Math.abs(a.midY - b.midY) <= 3;
-}
-
-function shouldStitchInline(prevEditor, editor, originalGap) {
-    const prevText = prevEditor.innerText || "";
-    const text = editor.innerText || "";
-    const closeInPdf = originalGap <= 8 && originalGap >= -6;
-
-    if (!closeInPdf) return false;
-
-    return (
-        prevEditor.dataset.isItalic === "1" ||
-        editor.dataset.isItalic === "1" ||
-        prevText.endsWith("(") ||
-        prevText.endsWith(" ") ||
-        text.startsWith(")") ||
-        text.startsWith(",") ||
-        text.startsWith(".")
-    );
-}
-
-function alignInlineStyleRuns() {
-    const wrappers = Array.from(document.querySelectorAll(".overlay-wrapper"));
-    const lines = [];
-
-    wrappers.forEach((wrapper) => {
-        const editor = wrapper.querySelector(".overlay-text");
-        if (!editor) return;
-
-        const lineKey = getInlineLineKey(wrapper);
-        let line = lines.find((candidate) =>
-            areSameVisualLine(candidate, lineKey),
-        );
-
-        if (!line) {
-            line = { ...lineKey, wrappers: [] };
-            lines.push(line);
-        }
-
-        line.wrappers.push(wrapper);
-    });
-
-    lines.forEach((line) => {
-        line.wrappers.sort((a, b) => {
-            return (
-                Number(a.dataset.originalLeft) - Number(b.dataset.originalLeft)
-            );
-        });
-
-        const lineTop = Math.min(
-            ...line.wrappers.map((wrapper) =>
-                Number(wrapper.dataset.originalTop),
-            ),
-        );
-
-        let prevWrapper = null;
-
-        line.wrappers.forEach((wrapper) => {
-            const editor = wrapper.querySelector(".overlay-text");
-            const originalLeft = Number(wrapper.dataset.originalLeft);
-            const originalTop = Number(wrapper.dataset.originalTop);
-            const originalRight = Number(wrapper.dataset.originalRight);
-            const editing = document.activeElement === editor;
-            const changed = editorHasChanges(editor);
-            const keepCurrentPosition = editing || changed;
-            let visualLeft = originalLeft;
-
-            editor.style.top = `${lineTop - originalTop}px`;
-
-            if (keepCurrentPosition) {
-                visualLeft = Number(wrapper.dataset.visualLeft || originalLeft);
-            } else if (prevWrapper) {
-                const prevEditor = prevWrapper.querySelector(".overlay-text");
-                const prevOriginalRight = Number(
-                    prevWrapper.dataset.originalRight,
-                );
-                const originalGap = originalLeft - prevOriginalRight;
-
-                if (shouldStitchInline(prevEditor, editor, originalGap)) {
-                    const prevVisualRight = Number(
-                        prevWrapper.dataset.visualRight,
-                    );
-                    const candidateLeft =
-                        prevVisualRight + Math.max(originalGap, 0);
-
-                    if (originalLeft - candidateLeft > 3) {
-                        visualLeft = candidateLeft;
-                    }
-                }
-            }
-
-            editor.style.left = `${visualLeft - originalLeft}px`;
-
-            wrapper.dataset.visualRight =
-                visualLeft +
-                measureRawTextWidthForElement(editor, editor.innerText || "");
-            prevWrapper = wrapper;
-            wrapper.dataset.visualLeft = visualLeft;
-            wrapper.dataset.originalRight = originalRight;
-        });
-    });
+    resizeBlockToText(editor);
+    updateCoverGeometry(editor);
 }
 
 function createOverlayDiv(unit, pageData) {
@@ -336,38 +303,36 @@ function createOverlayDiv(unit, pageData) {
     cover.className = "overlay-cover";
 
     const editor = document.createElement("div");
-    editor.className = "overlay-text";
+    editor.className = "overlay-text overlay-hidden";
     editor.contentEditable = "true";
     editor.spellcheck = false;
-    editor.innerText = unit.text;
+    editor.textContent = unit.text;
 
     const left = unit.x0 * scale;
-    const top = unit.y0 * scale - 1;
-    const baseWidth = Math.max((unit.x1 - unit.x0) * scale + 4, 20);
-    const baseHeight = Math.max(
-        (unit.y1 - unit.y0) * scale + 4,
-        unit.size * scale * 1.25,
-    );
 
+    // Позиционирование от baseline, чтобы курсив в скобках совпадал лучше
+    const top = (unit.originY - unit.size * 0.92) * scale;
+
+    const targetWidth = Math.max((unit.x1 - unit.x0) * scale, MIN_TEXT_WIDTH);
+    const baseWidth = Math.max(targetWidth + TEXT_WIDTH_PAD, 20);
+    const baseHeight = Math.max(unit.size * scale * 1.35, 20);
     const maxX = (unit.maxX ?? pageData.width) * scale;
-    const coverWidth = Math.max(maxX - left, baseWidth);
+    const maxWidth = Math.max(maxX - left, baseWidth);
 
     wrapper.style.position = "absolute";
     wrapper.style.left = `${left}px`;
     wrapper.style.top = `${top}px`;
-    wrapper.style.width = `${coverWidth}px`;
+    wrapper.style.width = `${maxWidth}px`;
     wrapper.style.height = `${baseHeight}px`;
     wrapper.style.overflow = "visible";
-    wrapper.dataset.originalLeft = left;
-    wrapper.dataset.originalTop = top;
-    wrapper.dataset.originalRight = unit.x1 * scale;
 
     cover.style.position = "absolute";
-    cover.style.left = "0px";
-    cover.style.top = "0px";
-    cover.style.width = `${coverWidth}px`;
-    cover.style.height = `${baseHeight}px`;
+    cover.style.left = `0px`;
+    cover.style.top = `${COVER_PAD_Y}px`;
+    cover.style.width = `${baseWidth}px`;
+    cover.style.height = `${Math.max(baseHeight - COVER_PAD_Y * 2, 1)}px`;
     cover.style.background = "#ffffff";
+    cover.style.display = "none";
 
     editor.style.position = "absolute";
     editor.style.left = "0px";
@@ -376,6 +341,7 @@ function createOverlayDiv(unit, pageData) {
     editor.style.minWidth = "8px";
     editor.style.height = `${baseHeight}px`;
     editor.style.fontSize = `${unit.size * scale}px`;
+    editor.style.whiteSpace = "pre";
 
     if (unit.webFontFamily) {
         editor.style.fontFamily = `"${unit.webFontFamily}", ${unit.browserFont || "serif"}`;
@@ -387,14 +353,13 @@ function createOverlayDiv(unit, pageData) {
     editor.style.fontStyle = unit.isItalic ? "italic" : "normal";
     editor.style.fontWeight = unit.isBold ? "bold" : "normal";
 
-    editor.dataset.unitId = unit.id;
     editor.dataset.page = unit.page;
-    editor.dataset.pageWidth = pageData.width;
     editor.dataset.x0 = unit.x0;
     editor.dataset.y0 = unit.y0;
     editor.dataset.x1 = unit.x1;
     editor.dataset.y1 = unit.y1;
     editor.dataset.maxX = unit.maxX ?? pageData.width;
+
     editor.dataset.font = unit.font || "";
     editor.dataset.size = unit.size;
     editor.dataset.color = unit.color;
@@ -404,28 +369,34 @@ function createOverlayDiv(unit, pageData) {
     editor.dataset.isItalic = unit.isItalic ? "1" : "0";
     editor.dataset.isBold = unit.isBold ? "1" : "0";
     editor.dataset.originalWidth = baseWidth;
-    editor.dataset.maxWidth = coverWidth;
+    editor.dataset.targetTextWidth = targetWidth;
+    editor.dataset.maxWidth = maxWidth;
+    editor.dataset.originY = unit.originY;
 
-    editor.style.width = `${baseWidth}px`;
     editor.addEventListener("focus", () => {
         wrapper.classList.add("editing");
+        setEditorVisibility(editor, true);
         resizeBlockToText(editor);
         updateEditorVisualState(editor);
-        alignInlineStyleRuns();
     });
+
     editor.addEventListener("blur", () => {
         wrapper.classList.remove("editing");
         if (!editorHasChanges(editor)) {
             editor.style.width = `${editor.dataset.originalWidth}px`;
         }
         updateEditorVisualState(editor);
-        alignInlineStyleRuns();
     });
+
     editor.addEventListener("input", () => {
-        resizeBlockToText(editor);
-        editor.dataset.prevText = editor.innerText;
+        if (!fitsTextInBlock(editor, editorText(editor))) {
+            editor.textContent =
+                editor.dataset.prevText || editor.dataset.oldText || "";
+            placeCursorAtEnd(editor);
+        }
+
+        editor.dataset.prevText = editorText(editor);
         updateEditorVisualState(editor);
-        alignInlineStyleRuns();
     });
 
     editor.addEventListener("beforeinput", (e) => {
@@ -453,17 +424,20 @@ function createOverlayDiv(unit, pageData) {
             inputType === "insertFromPaste" ||
             inputType === "insertCompositionText"
         ) {
-            const currentText = editor.innerText || "";
+            const currentText = editorText(editor);
             const { start, end } = getSelectionOffsets(editor);
 
             let incomingText = e.data ?? "";
 
             if (inputType === "insertFromPaste") {
-                incomingText =
+                incomingText = (
                     (e.clipboardData || window.clipboardData)?.getData(
                         "text",
-                    ) || "";
+                    ) || ""
+                ).replace(/\r?\n/g, " ");
             }
+
+            incomingText = (incomingText || "").replace(/\r?\n/g, " ");
 
             const predictedText = buildPredictedText(
                 currentText,
@@ -472,12 +446,20 @@ function createOverlayDiv(unit, pageData) {
                 end,
             );
 
-            const fits = fitsTextInBlock(editor, predictedText);
-
-            if (!fits) {
+            if (!fitsTextInBlock(editor, predictedText)) {
                 e.preventDefault();
                 placeCursorAtEnd(editor);
             }
+        }
+    });
+
+    wrapper.addEventListener("mousedown", () => {
+        if (document.activeElement !== editor) {
+            setEditorVisibility(editor, true);
+            requestAnimationFrame(() => {
+                editor.focus();
+                placeCursorAtEnd(editor);
+            });
         }
     });
 
@@ -486,23 +468,22 @@ function createOverlayDiv(unit, pageData) {
     updateEditorVisualState(editor);
     return wrapper;
 }
-async function uploadPdf() {
-    const file = pdfFileInput.files[0];
 
+async function openPdf() {
+    const file = pdfFileInput.files[0];
     if (!file) {
         alert("Выбери PDF файл");
         return;
     }
-
     try {
         setStatus("Загрузка PDF...");
-        saveBtn.disabled = true;
+        applyBtn.disabled = true;
         viewer.innerHTML = "";
 
         const formData = new FormData();
         formData.append("pdf", file);
 
-        const response = await fetch("/upload", {
+        const response = await fetch("/api/pdf/open", {
             method: "POST",
             body: formData,
         });
@@ -510,7 +491,7 @@ async function uploadPdf() {
         const data = await response.json();
 
         if (!response.ok || data.error) {
-            throw new Error(data.error || "Ошибка загрузки PDF");
+            throw new Error(data.error || "Ошибка открытия PDF");
         }
 
         currentFilename = data.filename;
@@ -520,28 +501,26 @@ async function uploadPdf() {
         await registerFontFaces(data.fontFaces || []);
         await renderPdfWithOverlay(currentPdfUrl, currentPages);
 
-        saveBtn.disabled = false;
+        applyBtn.disabled = false;
         setStatus("PDF загружен");
     } catch (error) {
         console.error(error);
-        setStatus(error.message || "Ошибка загрузки PDF", true);
+        setStatus(error.message || "Ошибка открытия PDF", true);
     }
 }
+
 function resizeAllOverlayTexts() {
     const editors = document.querySelectorAll(".overlay-text");
     editors.forEach((editor) => {
-        if (editorHasChanges(editor) || document.activeElement === editor) {
-            resizeBlockToText(editor);
-        } else {
+        if (!editorHasChanges(editor) && document.activeElement !== editor) {
             editor.style.width = `${editor.dataset.originalWidth}px`;
         }
         updateEditorVisualState(editor);
     });
-    alignInlineStyleRuns();
 }
+
 async function renderPdfWithOverlay(pdfUrl, pagesData) {
     viewer.innerHTML = "";
-
     const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
 
     for (let i = 0; i < pdf.numPages; i++) {
@@ -575,30 +554,28 @@ async function renderPdfWithOverlay(pdfUrl, pagesData) {
         const units = pageData?.units || [];
 
         for (const unit of units) {
-            const div = createOverlayDiv(unit, pageData);
-            overlayLayer.appendChild(div);
+            overlayLayer.appendChild(createOverlayDiv(unit, pageData));
         }
 
         pageWrapper.appendChild(overlayLayer);
         viewer.appendChild(pageWrapper);
     }
+
     resizeAllOverlayTexts();
 }
 
 function collectChanges() {
-    const elements = document.querySelectorAll(".overlay-text");
+    const editors = Array.from(document.querySelectorAll(".overlay-text"));
     const changes = [];
-
-    elements.forEach((el) => {
+    for (const el of editors) {
         const oldText = el.dataset.oldText || "";
-        const newText = el.innerText || "";
+        const newText = editorText(el);
 
         if (normalize(oldText) === normalize(newText)) {
-            return;
+            continue;
         }
 
         changes.push({
-            unitId: el.dataset.unitId,
             page: Number(el.dataset.page),
             oldText,
             newText,
@@ -607,24 +584,22 @@ function collectChanges() {
             x1: Number(el.dataset.x1),
             y1: Number(el.dataset.y1),
             maxX: Number(el.dataset.maxX),
-            font: el.dataset.font,
+            font: el.dataset.font || "",
             size: Number(el.dataset.size),
             color: Number(el.dataset.color),
             flags: Number(el.dataset.flags),
-            isItalic: el.dataset.isItalic === "1",
-            isBold: el.dataset.isBold === "1",
+            originY: Number(el.dataset.originY),
         });
-    });
+    }
 
     return changes;
 }
 
-async function savePdf() {
+async function applyPdfChanges() {
     if (!currentFilename) {
         alert("Сначала загрузи PDF");
         return;
     }
-
     try {
         const changes = collectChanges();
 
@@ -634,9 +609,9 @@ async function savePdf() {
         }
 
         setStatus("Сохранение PDF...");
-        saveBtn.disabled = true;
+        applyBtn.disabled = true;
 
-        const response = await fetch("/save", {
+        const response = await fetch("/api/pdf/apply", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -653,12 +628,12 @@ async function savePdf() {
             throw new Error(data.error || "Ошибка сохранения PDF");
         }
 
-        setStatus("PDF сохранён, начинается загрузка");
+        setStatus("PDF сохранён");
         window.location.href = data.downloadUrl;
     } catch (error) {
         console.error(error);
         setStatus(error.message || "Ошибка сохранения PDF", true);
     } finally {
-        saveBtn.disabled = false;
+        applyBtn.disabled = false;
     }
 }

@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response
+from flask import Flask, render_template, request, jsonify, Response, send_file
 from pathlib import Path
 import fitz
 import uuid
@@ -6,19 +6,19 @@ import hashlib
 import traceback
 import re
 import unicodedata
+import io
 
 app = Flask(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
-UPLOADS_DIR = BASE_DIR / "uploads"
-OUTPUTS_DIR = BASE_DIR / "outputs"
 FONTS_DIR = BASE_DIR / "fonts"
-
-UPLOADS_DIR.mkdir(exist_ok=True)
-OUTPUTS_DIR.mkdir(exist_ok=True)
 FONTS_DIR.mkdir(exist_ok=True)
 
 RUNTIME_FONTS = {}
+
+# Замість uploads/outputs — зберігання в пам'яті
+PDF_STORE = {}
+GENERATED_PDF_STORE = {}
 
 BROWSER_FONT_EXTS = {"ttf", "otf", "woff", "woff2"}
 BUILTIN_FONTNAMES = {
@@ -30,11 +30,11 @@ BUILTIN_FONTNAMES = {
 MIN_REPLACEMENT_FONT_SIZE = 5.0
 
 PREFIX_ACCENT_MARKS = {
-    "\u00b4": "\u0301",  # ´
-    "\u02c7": "\u030c",  # ˇ
-    "\u02c6": "\u0302",  # ˆ
+    "\u00b4": "\u0301",
+    "\u02c7": "\u030c",
+    "\u02c6": "\u0302",
     "`": "\u0300",
-    "\u00a8": "\u0308",  # ¨
+    "\u00a8": "\u0308",
 }
 PREFIX_ACCENT_RE = re.compile(
     f"([{re.escape(''.join(PREFIX_ACCENT_MARKS.keys()))}])([A-Za-z\u0131])"
@@ -295,12 +295,11 @@ def same_style(a, b) -> bool:
     if abs(float(a.get("size", 0)) - float(b.get("size", 0))) > 0.5:
         return False
 
-    # Строгое сравнение битов жирного (16) и курсива (2)
     flags_a = int(a.get("flags", 0))
     flags_b = int(b.get("flags", 0))
-    if (flags_a & 2) != (flags_b & 2):   # Italic bit
+    if (flags_a & 2) != (flags_b & 2):
         return False
-    if (flags_a & 16) != (flags_b & 16): # Bold bit
+    if (flags_a & 16) != (flags_b & 16):
         return False
 
     if int(a.get("color", 0)) != int(b.get("color", 0)):
@@ -473,8 +472,8 @@ def split_line_into_units(page_index: int, line: dict, page_font_map: dict):
     return units
 
 
-def extract_pdf_data(pdf_path: Path):
-    doc = fitz.open(pdf_path)
+def extract_pdf_data_from_bytes(pdf_bytes: bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages_result = []
     font_faces = []
     seen_faces = set()
@@ -552,43 +551,6 @@ def find_best_span_for_rect(page, rect: fitz.Rect):
     return best_span
 
 
-def find_best_line_for_rect(page, rect: fitz.Rect):
-    text = page.get_text("dict")
-    best_line = None
-    best_score = 0.0
-
-    for block in text.get("blocks", []):
-        for line in block.get("lines", []):
-            if "bbox" not in line:
-                continue
-            line_rect = fitz.Rect(line["bbox"])
-            inter = line_rect & rect
-            area = inter.get_area()
-            if area <= 0:
-                continue
-
-            line_text = "".join(
-                span.get("text", "")
-                for span in line.get("spans", [])
-            )
-            score = area * max(sum(ch.isalnum() for ch in line_text), 1)
-            if score > best_score:
-                best_score = score
-                best_line = line
-
-    return best_line
-
-
-def line_dominant_span(line: dict):
-    spans = line.get("spans", [])
-    if not spans:
-        return None
-    return max(
-        spans,
-        key=lambda s: len(normalize_text(s.get("text", ""))) or 1
-    )
-
-
 def replace_text_keep_style(
     doc,
     page,
@@ -603,7 +565,6 @@ def replace_text_keep_style(
 ):
     new_text = normalize_pdf_unicode_text(new_text)
     span = find_best_span_for_rect(page, rect)
-    line = find_best_line_for_rect(page, rect)
 
     if span is None and (font_name is None or size is None or color_int is None or origin_y is None):
         return False
@@ -631,11 +592,9 @@ def replace_text_keep_style(
     draw_x = float(rect.x0)
     available_width = max(right_limit - draw_x, 1)
 
-    # Компактный вертикальный отступ (было 0.2, стало 0.05)
     erase_rect.y0 -= font_size * 0.05
     erase_rect.y1 += font_size * 0.05
 
-    # Проверяем длину нового текста и масштабируем шрифт, если не помещается
     try:
         new_width = selected_font["font_obj"].text_length(new_text, fontsize=font_size)
     except Exception:
@@ -657,7 +616,6 @@ def replace_text_keep_style(
                 test_size = MIN_REPLACEMENT_FONT_SIZE
                 break
 
-    # Расширяем область стирания вправо только до реальной ширины нового текста
     try:
         final_width = selected_font["font_obj"].text_length(new_text, fontsize=test_size)
     except Exception:
@@ -667,14 +625,12 @@ def replace_text_keep_style(
     if erase_rect.x1 > right_limit:
         erase_rect.x1 = right_limit
 
-    # Применяем redaction (белый фон)
     try:
         page.add_redact_annot(erase_rect, fill=(1, 1, 1))
         page.apply_redactions()
     except Exception:
         page.draw_rect(erase_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
 
-    # Вставляем новый текст
     try:
         if selected_font["mode"] == "buffer":
             runtime_font_name = f"F_{uuid.uuid4().hex[:8]}"
@@ -709,15 +665,21 @@ def open_pdf():
     if not file.filename.lower().endswith(".pdf"):
         return jsonify({"error": "Нужен PDF файл"}), 400
 
-    filename = f"{uuid.uuid4()}.pdf"
-    pdf_path = UPLOADS_DIR / filename
-    file.save(pdf_path)
+    pdf_bytes = file.read()
+    if not pdf_bytes:
+        return jsonify({"error": "Пустой PDF файл"}), 400
+
+    file_id = str(uuid.uuid4())
+    PDF_STORE[file_id] = {
+        "filename": file.filename or f"{file_id}.pdf",
+        "bytes": pdf_bytes,
+    }
 
     try:
-        pages, font_faces = extract_pdf_data(pdf_path)
+        pages, font_faces = extract_pdf_data_from_bytes(pdf_bytes)
         return jsonify({
-            "filename": filename,
-            "pdfUrl": f"/uploads/{filename}",
+            "filename": file_id,
+            "pdfUrl": f"/api/pdf/source/{file_id}",
             "pages": pages,
             "fontFaces": font_faces,
         })
@@ -732,21 +694,18 @@ def apply_pdf_changes():
     if not data:
         return jsonify({"error": "Некорректный JSON"}), 400
 
-    filename = data.get("filename")
+    file_id = data.get("filename")
     changes = data.get("changes", [])
 
-    if not filename:
+    if not file_id:
         return jsonify({"error": "Не передан filename"}), 400
 
-    source_path = UPLOADS_DIR / filename
-    if not source_path.exists():
+    item = PDF_STORE.get(file_id)
+    if item is None:
         return jsonify({"error": "Исходный PDF не найден"}), 404
 
-    out_name = f"edited_{filename}"
-    out_path = OUTPUTS_DIR / out_name
-
     try:
-        doc = fitz.open(source_path)
+        doc = fitz.open(stream=item["bytes"], filetype="pdf")
 
         for change in changes:
             old_text = normalize_pdf_unicode_text(change.get("oldText", ""))
@@ -782,25 +741,51 @@ def apply_pdf_changes():
             if not ok:
                 print("WARNING: could not replace text:", old_text, "->", new_text)
 
-        doc.save(out_path, garbage=4, deflate=True)
+        out_buffer = io.BytesIO()
+        doc.save(out_buffer, garbage=4, deflate=True)
         doc.close()
+        out_buffer.seek(0)
+
+        output_id = str(uuid.uuid4())
+        GENERATED_PDF_STORE[output_id] = {
+            "filename": f"edited_{item['filename']}",
+            "bytes": out_buffer.getvalue(),
+        }
 
         return jsonify({
-            "downloadUrl": f"/outputs/{out_name}"
+            "downloadUrl": f"/api/pdf/download/{output_id}"
         })
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Ошибка сохранения PDF: {e}"}), 500
 
 
-@app.route("/uploads/<path:filename>")
-def uploaded_file(filename):
-    return send_from_directory(UPLOADS_DIR, filename)
+@app.route("/api/pdf/source/<file_id>")
+def pdf_source(file_id):
+    item = PDF_STORE.get(file_id)
+    if item is None:
+        return jsonify({"error": "PDF не найден"}), 404
+
+    return send_file(
+        io.BytesIO(item["bytes"]),
+        mimetype="application/pdf",
+        as_attachment=False,
+        download_name=item["filename"],
+    )
 
 
-@app.route("/outputs/<path:filename>")
-def output_file(filename):
-    return send_from_directory(OUTPUTS_DIR, filename, as_attachment=True)
+@app.route("/api/pdf/download/<output_id>")
+def pdf_download(output_id):
+    item = GENERATED_PDF_STORE.get(output_id)
+    if item is None:
+        return jsonify({"error": "Готовый PDF не найден"}), 404
+
+    return send_file(
+        io.BytesIO(item["bytes"]),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=item["filename"],
+    )
 
 
 @app.route("/runtime_fonts/<path:font_id>")

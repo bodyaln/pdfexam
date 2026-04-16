@@ -203,11 +203,8 @@ function createOverlayDiv(unit, pageData) {
     editor.style.height = `${baseHeight}px`;
     editor.style.fontSize = `${unit.size * scale}px`;
 
-    if (unit.webFontFamily) {
-        editor.style.fontFamily = `"${unit.webFontFamily}", ${unit.browserFont || "serif"}`;
-    } else {
-        editor.style.fontFamily = unit.browserFont || "Arial, sans-serif";
-    }
+    editor.style.fontFamily =
+        unit.browserFont || "Arial Unicode MS, Arial, sans-serif";
 
     editor.style.fontStyle = unit.isItalic ? "italic" : "normal";
     editor.style.fontWeight = unit.isBold ? "bold" : "normal";

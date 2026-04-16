@@ -18,20 +18,97 @@ EXTRACTED_FONTS_FOLDER.mkdir(exist_ok=True)
 
 
 REGULAR_FALLBACK_FONT_CANDIDATES = (
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/System/Library/Fonts/Supplemental/STIXTwoText.ttf",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     "/Library/Fonts/Arial Unicode.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/Library/Fonts/Arial.ttf",
+    "/System/Library/Fonts/Supplemental/STIXTwoText.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 )
 
 ITALIC_FALLBACK_FONT_CANDIDATES = (
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
-    "/System/Library/Fonts/Supplemental/STIXTwoText-Italic.ttf",
     "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
     "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+    "/System/Library/Fonts/Supplemental/STIXTwoText-Italic.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
 )
+
+FONT_FAMILY_FILE_CANDIDATES = {
+    "times": {
+        "regular": (
+            "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+            "/Library/Fonts/Times New Roman.ttf",
+        ),
+        "bold": (
+            "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf",
+            "/Library/Fonts/Times New Roman Bold.ttf",
+        ),
+        "italic": (
+            "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
+            "/Library/Fonts/Times New Roman Italic.ttf",
+        ),
+        "bold_italic": (
+            "/System/Library/Fonts/Supplemental/Times New Roman Bold Italic.ttf",
+            "/Library/Fonts/Times New Roman Bold Italic.ttf",
+        ),
+    },
+    "arial": {
+        "regular": (
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ),
+        "bold": (
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/Library/Fonts/Arial Bold.ttf",
+        ),
+        "italic": (
+            "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+            "/Library/Fonts/Arial Italic.ttf",
+        ),
+        "bold_italic": (
+            "/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf",
+            "/Library/Fonts/Arial Bold Italic.ttf",
+        ),
+    },
+    "courier": {
+        "regular": (
+            "/System/Library/Fonts/Supplemental/Courier New.ttf",
+            "/Library/Fonts/Courier New.ttf",
+        ),
+        "bold": (
+            "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
+            "/Library/Fonts/Courier New Bold.ttf",
+        ),
+        "italic": (
+            "/System/Library/Fonts/Supplemental/Courier New Italic.ttf",
+            "/Library/Fonts/Courier New Italic.ttf",
+        ),
+        "bold_italic": (
+            "/System/Library/Fonts/Supplemental/Courier New Bold Italic.ttf",
+            "/Library/Fonts/Courier New Bold Italic.ttf",
+        ),
+    },
+    "georgia": {
+        "regular": (
+            "/System/Library/Fonts/Supplemental/Georgia.ttf",
+            "/Library/Fonts/Georgia.ttf",
+        ),
+        "bold": (
+            "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
+            "/Library/Fonts/Georgia Bold.ttf",
+        ),
+        "italic": (
+            "/System/Library/Fonts/Supplemental/Georgia Italic.ttf",
+            "/Library/Fonts/Georgia Italic.ttf",
+        ),
+        "bold_italic": (
+            "/System/Library/Fonts/Supplemental/Georgia Bold Italic.ttf",
+            "/Library/Fonts/Georgia Bold Italic.ttf",
+        ),
+    },
+}
 
 
 def first_existing_font(candidates):
@@ -42,12 +119,152 @@ def first_existing_font(candidates):
     return None
 
 
-def default_fallback_font():
-    return first_existing_font(REGULAR_FALLBACK_FONT_CANDIDATES)
+def font_supports_text(font_path, text):
+    try:
+        font = fitz.Font(fontfile=str(font_path))
+    except Exception:
+        return False
+
+    return font_object_supports_text(font, text)
 
 
-def default_italic_fallback_font():
-    return first_existing_font(ITALIC_FALLBACK_FONT_CANDIDATES)
+def font_object_supports_text(font_obj, text):
+    for char in text or "":
+        if char.isspace():
+            continue
+        try:
+            if not font_obj.has_glyph(ord(char)):
+                return False
+        except Exception:
+            return False
+
+    return True
+
+
+def first_font_supporting_text(candidates, text):
+    for font_path in candidates:
+        path = Path(font_path)
+        if path.exists() and font_supports_text(path, text):
+            return path
+
+    return first_existing_font(candidates)
+
+
+def default_fallback_font(text=""):
+    return first_font_supporting_text(REGULAR_FALLBACK_FONT_CANDIDATES, text)
+
+
+def default_italic_fallback_font(text=""):
+    return first_font_supporting_text(ITALIC_FALLBACK_FONT_CANDIDATES, text)
+
+
+def font_style_key(is_bold, is_italic):
+    if is_bold and is_italic:
+        return "bold_italic"
+    if is_bold:
+        return "bold"
+    if is_italic:
+        return "italic"
+    return "regular"
+
+
+def fallback_style_order(is_bold, is_italic):
+    requested = font_style_key(is_bold, is_italic)
+    order = [requested]
+
+    for style in ("regular", "bold", "italic", "bold_italic"):
+        if style not in order:
+            order.append(style)
+
+    return order
+
+
+def font_family_key(pdf_font_name):
+    name = clean_font_name(pdf_font_name).lower()
+
+    if "times" in name:
+        return "times"
+    if "arial" in name or "helvetica" in name:
+        return "arial"
+    if "courier" in name:
+        return "courier"
+    if "georgia" in name:
+        return "georgia"
+
+    return None
+
+
+def matching_system_font_candidates(pdf_font_name, is_bold, is_italic):
+    family_key = font_family_key(pdf_font_name)
+    if family_key is None:
+        return []
+
+    family = FONT_FAMILY_FILE_CANDIDATES[family_key]
+    candidates = []
+
+    for style in fallback_style_order(is_bold, is_italic):
+        candidates.extend(family.get(style, ()))
+
+    return candidates
+
+
+def select_font_for_replacement(
+    doc,
+    page,
+    span,
+    new_text,
+    fallback_font=None,
+    italic_fallback_font=None,
+):
+    font_name = span.get("font", "")
+    flags = int(span.get("flags", 0))
+    font_name_lower = font_name.lower()
+    is_italic = "italic" in font_name_lower or "oblique" in font_name_lower or bool(flags & 2)
+    is_bold = "bold" in font_name_lower or bool(flags & 16)
+
+    for font_path in matching_system_font_candidates(font_name, is_bold, is_italic):
+        path = Path(font_path)
+        if not path.exists():
+            continue
+
+        try:
+            font_obj = fitz.Font(fontfile=str(path))
+        except Exception:
+            continue
+
+        if font_object_supports_text(font_obj, new_text):
+            return {
+                "font_obj": font_obj,
+                "font_file": str(path),
+            }
+
+    original_font_name, original_font_buffer = find_font_data(doc, page, font_name)
+    if original_font_buffer is not None:
+        font_obj = create_font_object_from_buffer(original_font_buffer)
+        if font_obj is not None and font_object_supports_text(font_obj, new_text):
+            return {
+                "font_obj": font_obj,
+                "font_buffer": original_font_buffer,
+                "font_resource_name": original_font_name or f"ORIG_{uuid.uuid4().hex[:8]}",
+            }
+
+    if is_italic:
+        fallback_path = default_italic_fallback_font(new_text) or italic_fallback_font
+    else:
+        fallback_path = default_fallback_font(new_text) or fallback_font
+
+    if fallback_path is None:
+        return None
+
+    try:
+        font_obj = fitz.Font(fontfile=str(fallback_path))
+    except Exception:
+        return None
+
+    return {
+        "font_obj": font_obj,
+        "font_file": str(fallback_path),
+    }
 
 
 def int_rgb_to_tuple(color_int):
@@ -400,70 +617,49 @@ def replace_item_keep_style(
 
     font_size = float(span.get("size", 12))
     color = int_rgb_to_tuple(span.get("color", 0))
-    is_italic = "italic" in span.get("font", "").lower() or (span.get("flags", 0) & 2)
+
+    font_choice = select_font_for_replacement(
+        doc=doc,
+        page=page,
+        span=span,
+        new_text=new_text,
+        fallback_font=fallback_font,
+        italic_fallback_font=italic_fallback_font,
+    )
+    if font_choice is None:
+        return False
 
     redraw_rect = fitz.Rect(rect)
     redraw_rect.y0 -= font_size * 0.20
     redraw_rect.y1 += font_size * 0.20
 
-    # Реальная область по ширине, в которую текст может влезть
     text_right_limit = float(max_x) if max_x is not None else redraw_rect.x1 + font_size * 2.0
     text_right_limit = min(text_right_limit, page.rect.x1 - 2)
-
     available_width = max(text_right_limit - redraw_rect.x0, 1)
 
-    # baseline стараемся брать из оригинального span
     baseline_y = span.get("origin", [redraw_rect.x0, redraw_rect.y1])[1]
 
-    candidates = []
+    font_obj = font_choice["font_obj"]
 
-    # 1) пробуем оригинальный PDF font resource
-    original_font_name, original_font_buffer = find_font_data(doc, page, span.get("font", ""))
-    if original_font_buffer is not None:
-        font_obj = create_font_object_from_buffer(original_font_buffer)
-        if font_obj is not None:
-            candidates.append({
-                "kind": "buffer",
-                "font_obj": font_obj,
-                "font_name": original_font_name or f"ORIG_{uuid.uuid4().hex[:6]}",
-                "font_buffer": original_font_buffer,
-            })
-
-    # 2) fallback font
-    fallback_path = italic_fallback_font if is_italic and italic_fallback_font else fallback_font
-    if fallback_path is not None:
-        font_obj = create_font_object_from_file(fallback_path)
-        if font_obj is not None:
-            candidates.append({
-                "kind": "file",
-                "font_obj": font_obj,
-                "font_name": f"FALLBACK_{uuid.uuid4().hex[:8]}",
-                "font_file": str(fallback_path),
-            })
-
-    # если шрифтов вообще нет — выходим, ничего не портим
-    if not candidates:
-        return False
-
-    chosen = None
+    # Подбираем размер, чтобы влезло
     chosen_size = font_size
+    fitted = False
 
-    # Сначала ищем шрифт, который влезает при исходном размере или при небольшом уменьшении
-    for candidate in candidates:
-        test_size = font_size
-        for _ in range(10):
-            if text_fits_single_line(candidate["font_obj"], new_text, test_size, available_width):
-                chosen = candidate
-                chosen_size = test_size
+    for _ in range(12):
+        try:
+            text_width = font_obj.text_length(new_text, fontsize=chosen_size)
+            if text_width <= max(available_width - 1.5, 1):
+                fitted = True
                 break
-            test_size -= 0.5
-            if test_size < 5:
-                break
-        if chosen is not None:
+        except Exception:
+            return False
+
+        chosen_size -= 0.5
+        if chosen_size < 5:
             break
 
-    # ничего не влезло — не трогаем старый текст
-    if chosen is None:
+    # Не влезает — ничего не удаляем
+    if not fitted:
         return False
 
     # Только теперь удаляем старый текст
@@ -473,21 +669,18 @@ def replace_item_keep_style(
     except Exception:
         page.draw_rect(redraw_rect, color=background, fill=background, overlay=True)
 
-    # Регистрируем выбранный шрифт в странице
-    try:
-        if chosen["kind"] == "buffer":
-            page.insert_font(fontname=chosen["font_name"], fontbuffer=chosen["font_buffer"])
-        else:
-            page.insert_font(fontname=chosen["font_name"], fontfile=chosen["font_file"])
-    except Exception:
-        return False
+    font_name = f"FALLBACK_{uuid.uuid4().hex[:8]}"
 
-    # Вставляем как одну строку, чтобы не было проблем insert_textbox
     try:
+        if "font_buffer" in font_choice:
+            page.insert_font(fontname=font_name, fontbuffer=font_choice["font_buffer"])
+        else:
+            page.insert_font(fontname=font_name, fontfile=font_choice["font_file"])
+
         page.insert_text(
             fitz.Point(redraw_rect.x0, baseline_y),
             new_text,
-            fontname=chosen["font_name"],
+            fontname=font_name,
             fontsize=chosen_size,
             color=color,
             overlay=True,
@@ -495,7 +688,6 @@ def replace_item_keep_style(
         return True
     except Exception:
         return False
-
 
 @app.route("/")
 def index():

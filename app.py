@@ -26,6 +26,7 @@ BUILTIN_FONTNAMES = {
     "bolditalic": "Times-BoldItalic",
 }
 MIN_REPLACEMENT_FONT_SIZE = 5.0
+MIN_TEXT_HORIZONTAL_SCALE = 0.65
 
 PREFIX_ACCENT_MARKS = {
     "\u00b4": "\u0301",
@@ -41,25 +42,30 @@ POSTFIX_CARON_RE = re.compile(r"([dltDLT])[\u2019']")
 DIACRITIC_SPAN_CHARS = set(PREFIX_ACCENT_MARKS.keys()) | {"\u2019", "'"}
 
 
+# Очищает имя шрифта от PDF-префикса подмножества.
 def clean_font_name(name: str) -> str:
     return (name or "").split("+", 1)[-1]
 
 
+# Превращает имя шрифта в безопасное имя для URL и CSS.
 def slugify(value: str) -> str:
     value = clean_font_name(value)
     value = re.sub(r"[^a-zA-Z0-9_-]+", "_", value)
     return value.strip("_") or f"font_{uuid.uuid4().hex[:8]}"
 
 
+# Нормализует текст PDF и склеивает раздельные диакритические знаки.
 def normalize_pdf_unicode_text(value: str) -> str:
     text = (value or "").replace("\u00a0", " ")
 
+    # Собирает символ с акцентом, если акцент стоит перед буквой.
     def compose_prefix_accent(match):
         accent, char = match.groups()
         if char == "\u0131":
             char = "i"
         return unicodedata.normalize("NFC", char + PREFIX_ACCENT_MARKS[accent])
 
+    # Собирает словацкий мягкий знак, если он стоит после буквы.
     def compose_postfix_caron(match):
         return unicodedata.normalize("NFC", match.group(1) + "\u030c")
 
@@ -68,15 +74,18 @@ def normalize_pdf_unicode_text(value: str) -> str:
     return unicodedata.normalize("NFC", text)
 
 
+# Нормализует текст для сравнения пользовательских изменений.
 def normalize_text(value: str) -> str:
     return normalize_pdf_unicode_text(value).strip()
 
 
+# Проверяет, состоит ли PDF-спан только из диакритических знаков.
 def is_diacritic_span(span) -> bool:
     stripped = (span.get("text", "") or "").strip()
     return bool(stripped) and all(ch in DIACRITIC_SPAN_CHARS for ch in stripped)
 
 
+# Определяет жирность и курсив по имени шрифта и флагам PyMuPDF.
 def font_traits(font_name: str, flags: int = 0):
     name = clean_font_name(font_name).lower()
     flags = int(flags or 0)
@@ -95,6 +104,7 @@ def font_traits(font_name: str, flags: int = 0):
     return is_bold, is_italic
 
 
+# Возвращает ключ стиля для выбора подходящего шрифта.
 def style_key(is_bold: bool, is_italic: bool) -> str:
     if is_bold and is_italic:
         return "bolditalic"
@@ -105,6 +115,7 @@ def style_key(is_bold: bool, is_italic: bool) -> str:
     return "regular"
 
 
+# Определяет семейство шрифта по имени PDF-шрифта.
 def classify_family(font_name: str) -> str:
     name = clean_font_name(font_name).lower()
 
@@ -117,6 +128,7 @@ def classify_family(font_name: str) -> str:
     return "serif"
 
 
+# Возвращает безопасный браузерный fallback для CSS.
 def browser_safe_font_name(pdf_font_name: str) -> str:
     family = classify_family(pdf_font_name)
     if family == "sans":
@@ -126,6 +138,7 @@ def browser_safe_font_name(pdf_font_name: str) -> str:
     return "Times New Roman, Times, serif"
 
 
+# Подбирает локальный fallback-шрифт по семейству и стилю.
 def fallback_font_path(font_name: str, is_bold: bool, is_italic: bool) -> Path | None:
     family = classify_family(font_name)
 
@@ -152,6 +165,7 @@ def fallback_font_path(font_name: str, is_bold: bool, is_italic: bool) -> Path |
     return path if path.exists() else None
 
 
+# Возвращает MIME-тип для файла шрифта.
 def font_mimetype(ext: str) -> str:
     ext = (ext or "").lower()
     if ext == "otf":
@@ -165,6 +179,7 @@ def font_mimetype(ext: str) -> str:
     return "application/octet-stream"
 
 
+# Регистрирует временный шрифт в памяти и возвращает URL для браузера.
 def register_runtime_font(font_buffer: bytes, ext: str, font_name: str) -> str:
     digest = hashlib.sha256(font_buffer).hexdigest()[:20]
     ext = (ext or "otf").lower()
@@ -176,6 +191,7 @@ def register_runtime_font(font_buffer: bytes, ext: str, font_name: str) -> str:
     return f"/runtime_fonts/{font_id}"
 
 
+# Создает объект PyMuPDF Font из байтов шрифта.
 def create_font_obj_from_buffer(font_buffer: bytes | None):
     if not font_buffer:
         return None
@@ -185,6 +201,7 @@ def create_font_obj_from_buffer(font_buffer: bytes | None):
         return None
 
 
+# Проверяет, поддерживает ли шрифт все символы текста.
 def font_supports_text(font_obj, text: str) -> bool:
     if font_obj is None:
         return False
@@ -199,6 +216,7 @@ def font_supports_text(font_obj, text: str) -> bool:
         return False
 
 
+# Загружает fallback-шрифт с диска и готовит его для PyMuPDF.
 def load_fallback_font(font_name: str, is_bold: bool, is_italic: bool):
     path = fallback_font_path(font_name, is_bold, is_italic)
     if path is None:
@@ -219,6 +237,7 @@ def load_fallback_font(font_name: str, is_bold: bool, is_italic: bool):
         return None
 
 
+# Извлекает оригинальный ресурс шрифта со страницы PDF.
 def extract_original_font_resource(doc, page, span_font_name: str):
     wanted = clean_font_name(span_font_name).lower()
 
@@ -244,6 +263,7 @@ def extract_original_font_resource(doc, page, span_font_name: str):
     return None
 
 
+# Выбирает шрифт для вставки нового текста в PDF.
 def choose_insert_font(doc, page, font_name: str, flags: int, text: str):
     text = normalize_pdf_unicode_text(text)
     is_bold, is_italic = font_traits(font_name, flags)
@@ -281,6 +301,7 @@ def choose_insert_font(doc, page, font_name: str, flags: int, text: str):
     return None
 
 
+# Проверяет, совпадает ли стиль двух текстовых спанов.
 def same_style(a, b) -> bool:
     if clean_font_name(a.get("font", "")).lower() != clean_font_name(b.get("font", "")).lower():
         return False
@@ -301,10 +322,12 @@ def same_style(a, b) -> bool:
     return True
 
 
+# Проверяет, достаточно ли близко расположены соседние спаны.
 def close_enough(a, b, max_gap=6.0) -> bool:
     return float(b["bbox"][0]) - float(a["bbox"][2]) <= max_gap
 
 
+# Преобразует целочисленный цвет PyMuPDF в RGB-кортеж.
 def int_rgb_to_tuple(color_int: int):
     r = (color_int >> 16) & 255
     g = (color_int >> 8) & 255
@@ -312,6 +335,7 @@ def int_rgb_to_tuple(color_int: int):
     return r / 255, g / 255, b / 255
 
 
+# Собирает шрифты страницы и готовит CSS font-face данные для фронтенда.
 def collect_page_font_faces(doc, page):
     font_map = {}
 
@@ -360,6 +384,7 @@ def collect_page_font_faces(doc, page):
     return font_map
 
 
+# Находит лучший web-шрифт для конкретного PDF-шрифта.
 def find_best_web_font(font_name: str, page_font_map: dict):
     cleaned = clean_font_name(font_name).lower()
 
@@ -378,6 +403,7 @@ def find_best_web_font(font_name: str, page_font_map: dict):
     }
 
 
+# Создает редактируемую текстовую единицу из группы PDF-спанов.
 def build_unit_from_spans(page_index: int, spans: list, page_font_map: dict):
     if not spans:
         return None
@@ -426,6 +452,7 @@ def build_unit_from_spans(page_index: int, spans: list, page_font_map: dict):
     }
 
 
+# Разбивает строку PDF на редактируемые блоки с одинаковым стилем.
 def split_line_into_units(page_index: int, line: dict, page_font_map: dict):
     spans = line.get("spans", [])
     if not spans:
@@ -465,6 +492,7 @@ def split_line_into_units(page_index: int, line: dict, page_font_map: dict):
     return units
 
 
+# Извлекает страницы, текстовые блоки и шрифты из PDF-байтов.
 def extract_pdf_data_from_bytes(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages_result = []
@@ -522,6 +550,7 @@ def extract_pdf_data_from_bytes(pdf_bytes: bytes):
     return pages_result, font_faces
 
 
+# Находит наиболее подходящий исходный спан по прямоугольнику текста.
 def find_best_span_for_rect(page, rect: fitz.Rect):
     text = page.get_text("dict")
     best_span = None
@@ -544,6 +573,7 @@ def find_best_span_for_rect(page, rect: fitz.Rect):
     return best_span
 
 
+# Строит прямоугольник для удаления старого и нового положения текста.
 def build_erase_rect(old_rect: fitz.Rect, new_rect: fitz.Rect, font_size: float):
     erase_rect = fitz.Rect(
         min(old_rect.x0, new_rect.x0),
@@ -551,11 +581,12 @@ def build_erase_rect(old_rect: fitz.Rect, new_rect: fitz.Rect, font_size: float)
         max(old_rect.x1, new_rect.x1),
         max(old_rect.y1, new_rect.y1),
     )
-    erase_rect.y0 -= font_size * 0.05
-    erase_rect.y1 += font_size * 0.05
+    erase_rect.y0 -= font_size * 0.03
+    erase_rect.y1 += font_size * 0.03
     return erase_rect
 
 
+# Удаляет старую и новую область текста белой заливкой или редактированием PDF.
 def erase_old_and_new_regions(page, old_rect: fitz.Rect, new_rect: fitz.Rect, font_size: float):
     erase_rect = build_erase_rect(old_rect, new_rect, font_size)
     try:
@@ -655,10 +686,15 @@ def build_text_operation(
     except Exception:
         return None
 
+    text_scale_x = 1.0
+    rendered_width = final_width
     if final_width > available_width + 1.5:
-        return None
+        text_scale_x = available_width / final_width
+        if text_scale_x < MIN_TEXT_HORIZONTAL_SCALE:
+            return None
+        rendered_width = available_width
 
-    new_rect_x1 = draw_x + final_width + 2
+    new_rect_x1 = draw_x + rendered_width + 2
     if current_x1_override is not None:
         new_rect_x1 = max(new_rect_x1, float(current_x1_override))
     new_rect_x1 = min(new_rect_x1, right_limit)
@@ -673,6 +709,7 @@ def build_text_operation(
         "baseline_y": baseline_y,
         "font_size": font_size,
         "color": color,
+        "text_scale_x": text_scale_x,
         "selected_font": selected_font,
         "erase_rect": erase_rect,
     }
@@ -690,12 +727,19 @@ def insert_text_operation(page, operation):
         else:
             runtime_font_name = selected_font["font_name"]
 
+        text_scale_x = float(operation.get("text_scale_x", 1) or 1)
+        morph = None
+        if abs(text_scale_x - 1) > 0.001:
+            origin = fitz.Point(operation["draw_x"], operation["baseline_y"])
+            morph = (origin, fitz.Matrix(text_scale_x, 1))
+
         page.insert_text(
             fitz.Point(operation["draw_x"], operation["baseline_y"]),
             operation["text"],
             fontname=runtime_font_name,
             fontsize=operation["font_size"],
             color=operation["color"],
+            morph=morph,
             overlay=True,
         )
         return True
@@ -742,14 +786,14 @@ def index():
 def open_pdf():
     file = request.files.get("pdf")
     if not file:
-        return jsonify({"error": "Файл не загружен"}), 400
+        return jsonify({"error": "File dont load"}), 400
 
     if not file.filename.lower().endswith(".pdf"):
-        return jsonify({"error": "Нужен PDF файл"}), 400
+        return jsonify({"error": "Need pdf"}), 400
 
     pdf_bytes = file.read()
     if not pdf_bytes:
-        return jsonify({"error": "Пустой PDF файл"}), 400
+        return jsonify({"error": "empty pdf"}), 400
 
     file_id = str(uuid.uuid4())
     PDF_STORE[file_id] = {
@@ -767,24 +811,24 @@ def open_pdf():
         })
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": f"Ошибка обработки PDF: {e}"}), 500
+        return jsonify({"error": f"error PDF: {e}"}), 500
 
 
 @app.route("/api/pdf/apply", methods=["POST"])
 def apply_pdf_changes():
     data = request.get_json(silent=True)
     if not data:
-        return jsonify({"error": "Некорректный JSON"}), 400
+        return jsonify({"error": "not true JSON"}), 400
 
     file_id = data.get("filename")
     changes = data.get("changes", [])
 
     if not file_id:
-        return jsonify({"error": "Не передан filename"}), 400
+        return jsonify({"error": "dont sent filename"}), 400
 
     item = PDF_STORE.get(file_id)
     if item is None:
-        return jsonify({"error": "Исходный PDF не найден"}), 404
+        return jsonify({"error": "pdf not found "}), 404
 
     try:
         doc = fitz.open(stream=item["bytes"], filetype="pdf")
@@ -875,14 +919,14 @@ def apply_pdf_changes():
         })
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": f"Ошибка сохранения PDF: {e}"}), 500
+        return jsonify({"error": f"Error to save PDF: {e}"}), 500
 
 
 @app.route("/api/pdf/source/<file_id>")
 def pdf_source(file_id):
     item = PDF_STORE.get(file_id)
     if item is None:
-        return jsonify({"error": "PDF не найден"}), 404
+        return jsonify({"error": "PDF not found"}), 404
 
     return send_file(
         io.BytesIO(item["bytes"]),
@@ -896,7 +940,7 @@ def pdf_source(file_id):
 def pdf_download(output_id):
     item = GENERATED_PDF_STORE.get(output_id)
     if item is None:
-        return jsonify({"error": "Готовый PDF не найден"}), 404
+        return jsonify({"error": "Ready pdf dont found"}), 404
 
     return send_file(
         io.BytesIO(item["bytes"]),
@@ -910,7 +954,7 @@ def pdf_download(output_id):
 def runtime_font_file(font_id):
     item = RUNTIME_FONTS.get(font_id)
     if item is None:
-        return jsonify({"error": "Шрифт не найден"}), 404
+        return jsonify({"error": "font dont attach"}), 404
 
     return Response(
         item["buffer"],

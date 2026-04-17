@@ -52,6 +52,19 @@ button {
     font-size: 14px;
 }
 
+.file-input {
+    display: none;
+}
+
+.file-name {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    color: #4a5568;
+}
+
 button:hover:not(:disabled) {
     background: #f0f4f8;
 }
@@ -127,7 +140,6 @@ input[type="file"] {
     tab-size: 4;
     font-synthesis: none;
     -webkit-font-smoothing: antialiased;
-    transform: translateY(-0.06em);
 }
 
 .overlay-hidden {
@@ -142,6 +154,11 @@ input[type="file"] {
     z-index: 5;
     opacity: 1;
     color: #000;
+    caret-color: #000;
+}
+
+.overlay-wrapper.editing:not(.changed):not(.moved) .overlay-text {
+    color: transparent;
     caret-color: #000;
 }
 

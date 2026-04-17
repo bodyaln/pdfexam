@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="ru">
+<html lang="sk">
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>PDF Editor</title>
+        <title>Editor PDF</title>
         <link rel="stylesheet" href="/static/style.css" />
         <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     </head>
@@ -11,13 +11,21 @@
         <div class="app">
             <header class="toolbar">
                 <div class="toolbar-left">
-                    <input type="file" id="pdfFile" accept="application/pdf" />
-                    <button id="openBtn">Открыть PDF</button>
-                    <button id="applyBtn" disabled>Сохранить PDF</button>
+                    <button type="button" id="choosePdfBtn">Vybrať PDF</button>
+                    <input
+                        type="file"
+                        id="pdfFile"
+                        class="file-input"
+                        accept="application/pdf"
+                    />
+                    <span id="fileName" class="file-name"
+                        >PDF súbor nevybraný</span
+                    >
+                    <button id="applyBtn" disabled>Uložiť PDF</button>
                 </div>
 
                 <div class="toolbar-right">
-                    <span id="status">Готово</span>
+                    <span id="status">Pripravené</span>
                 </div>
             </header>
 

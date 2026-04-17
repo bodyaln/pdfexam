@@ -7,7 +7,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
     "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
 const pdfFileInput = document.getElementById("pdfFile");
-const openBtn = document.getElementById("openBtn");
+const choosePdfBtn = document.getElementById("choosePdfBtn");
+const fileNameEl = document.getElementById("fileName");
 const applyBtn = document.getElementById("applyBtn");
 const viewer = document.getElementById("viewer");
 const statusEl = document.getElementById("status");
@@ -18,26 +19,37 @@ const TEXT_WIDTH_PAD = 4;
 const MIN_TEXT_WIDTH = 8;
 const MIN_LETTER_SPACING = -1.2;
 const MAX_LETTER_SPACING = 1.8;
+const MIN_BLOCK_GAP = 2;
+const MAX_FLOW_GAP = 24;
+const HTML_BASELINE_RATIO = 0.78;
 
-openBtn.addEventListener("click", openPdf);
+choosePdfBtn.addEventListener("click", openPdfPicker);
+pdfFileInput.addEventListener("change", openPdf);
 applyBtn.addEventListener("click", applyPdfChanges);
 
+// Открывает системное окно выбора PDF-файла.
+function openPdfPicker() {
+    pdfFileInput.value = "";
+    pdfFileInput.click();
+}
+
+// Обновляет текст статуса и помечает его как ошибку при необходимости.
 function setStatus(text, isError = false) {
     statusEl.textContent = text;
     statusEl.classList.toggle("status-error", isError);
 }
 
+// Нормализует текст для сравнения, но сохраняет пробелы как реальные символы.
 function normalize(text) {
-    return (text || "")
-        .replace(/\u00a0/g, " ")
-        .replace(/\r/g, "")
-        .trim();
+    return (text || "").replace(/\u00a0/g, " ").replace(/\r/g, "");
 }
 
+// Возвращает чистый текст из редактируемого HTML-блока.
 function editorText(el) {
     return (el?.textContent || "").replace(/\r/g, "");
 }
 
+// Регистрирует шрифты, которые сервер извлек из PDF.
 async function registerFontFaces(fontFaces) {
     let styleTag = document.getElementById("dynamic-font-faces");
     if (!styleTag) {
@@ -70,11 +82,12 @@ async function registerFontFaces(fontFaces) {
             );
             await document.fonts.ready;
         } catch (e) {
-            console.warn("document.fonts.load failed", e);
+            console.warn("Načítanie fontov zlyhalo", e);
         }
     }
 }
 
+// Ставит курсор в конец редактируемого блока.
 function placeCursorAtEnd(el) {
     const range = document.createRange();
     const sel = window.getSelection();
@@ -84,6 +97,7 @@ function placeCursorAtEnd(el) {
     sel.addRange(range);
 }
 
+// Ставит курсор в указанную позицию внутри редактируемого блока.
 function setCursorOffset(el, offset) {
     const selection = window.getSelection();
     const textNode = el.firstChild;
@@ -103,6 +117,7 @@ function setCursorOffset(el, offset) {
     selection.addRange(range);
 }
 
+// Получает позиции начала и конца текущего выделения внутри блока.
 function getSelectionOffsets(element) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
@@ -133,10 +148,30 @@ function getSelectionOffsets(element) {
     return { start, end };
 }
 
+// Получает текст, выделенный внутри конкретного редактируемого блока.
+function getSelectedTextInside(element) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+        return "";
+    }
+
+    const range = selection.getRangeAt(0);
+    if (
+        !element.contains(range.startContainer) ||
+        !element.contains(range.endContainer)
+    ) {
+        return "";
+    }
+
+    return range.toString();
+}
+
+// Собирает текст после предполагаемой вставки.
 function buildPredictedText(currentText, insertText, start, end) {
     return currentText.slice(0, start) + insertText + currentText.slice(end);
 }
 
+// Собирает текст после удаления символа или выделенного фрагмента.
 function buildDeletedText(currentText, start, end, direction) {
     if (start !== end) {
         return {
@@ -176,10 +211,12 @@ function buildDeletedText(currentText, start, end, direction) {
     };
 }
 
+// Ограничивает число заданным диапазоном.
 function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
 }
 
+// Создает или возвращает скрытый элемент для измерения ширины текста.
 function getTextMeasurer() {
     let measurer = document.getElementById("text-width-measurer");
     if (!measurer) {
@@ -195,6 +232,7 @@ function getTextMeasurer() {
     return measurer;
 }
 
+// Измеряет реальную ширину текста с учетом стиля конкретного блока.
 function measureRawTextWidthForElement(el, text) {
     const measurer = getTextMeasurer();
     measurer.style.fontFamily = el.style.fontFamily;
@@ -208,10 +246,12 @@ function measureRawTextWidthForElement(el, text) {
     return measurer.getBoundingClientRect().width;
 }
 
+// Считает количество символов с учетом Unicode-пар.
 function getCharCount(text) {
     return Array.from(text || "").length;
 }
 
+// Подбирает межбуквенный интервал, чтобы текст ближе совпадал с PDF.
 function calculatePdfLetterSpacing(el, text) {
     const targetWidth = Number(
         el.dataset.targetTextWidth ||
@@ -241,12 +281,14 @@ function editorHasChanges(editor) {
     return normalize(editorText(editor)) !== normalize(editor.dataset.oldText);
 }
 
+// Проверяет, был ли блок сдвинут относительно исходной позиции.
 function editorMoved(editor) {
     const originalLeft = Number(editor.dataset.leftPx || 0);
     const dynamicLeft = Number(editor.dataset.dynamicLeftPx || originalLeft);
     return Math.abs(dynamicLeft - originalLeft) > 0.5;
 }
 
+// Применяет межбуквенный интервал к неизмененному тексту.
 function applyPdfLetterSpacing(el) {
     const changed = editorHasChanges(el);
 
@@ -260,6 +302,7 @@ function applyPdfLetterSpacing(el) {
     return spacing;
 }
 
+// Измеряет ширину текста с учетом текущего межбуквенного интервала.
 function measureTextWidthForElement(el, text) {
     const rawWidth = measureRawTextWidthForElement(el, text);
     const spacing = Number.parseFloat(el.style.letterSpacing || "0") || 0;
@@ -269,17 +312,23 @@ function measureTextWidthForElement(el, text) {
     );
 }
 
+// Возвращает минимальную ширину, которая нужна блоку для текущего текста.
 function getRequiredTextWidth(el) {
     applyPdfLetterSpacing(el);
-    return Math.max(measureTextWidthForElement(el, editorText(el)), MIN_TEXT_WIDTH);
+    return Math.max(
+        measureTextWidthForElement(el, editorText(el)),
+        MIN_TEXT_WIDTH,
+    );
 }
 
+// Находит следующий связанный блок на той же строке.
 function getNextEditor(editor) {
     const nextId = editor.dataset.nextEditorId;
     if (!nextId) return null;
     return document.querySelector(`.overlay-text[data-editor-id="${nextId}"]`);
 }
 
+// Считает доступную ширину от текущей позиции блока до края страницы.
 function getPageRemainingWidth(el) {
     const wrapper = el.parentElement;
     if (!wrapper) return MIN_TEXT_WIDTH;
@@ -294,6 +343,7 @@ function getPageRemainingWidth(el) {
     return Math.max(pageWidthPx - currentLeft - 2, MIN_TEXT_WIDTH);
 }
 
+// Считает максимальную ширину блока с учетом следующего блока или края страницы.
 function getMaxAllowedWidth(el) {
     const wrapper = el.parentElement;
     if (!wrapper) return MIN_TEXT_WIDTH;
@@ -314,6 +364,7 @@ function getMaxAllowedWidth(el) {
     return Math.max(nextLeft - currentLeft, MIN_TEXT_WIDTH);
 }
 
+// Проверяет, помещается ли предполагаемый текст в доступную ширину блока.
 function fitsTextInBlock(el, candidateText) {
     const prevSpacing = el.style.letterSpacing;
     el.style.letterSpacing = "0px";
@@ -325,6 +376,7 @@ function fitsTextInBlock(el, candidateText) {
     return fits;
 }
 
+// Подгоняет ширину блока под текст и возвращает, поместился ли текст.
 function resizeBlockToText(el, options = {}) {
     applyPdfLetterSpacing(el);
 
@@ -338,19 +390,21 @@ function resizeBlockToText(el, options = {}) {
     return measured <= maxAllowed;
 }
 
-function setEditorVisibility(editor, visible) {
+// Показывает или скрывает редактируемый HTML-блок и белую подложку.
+function setEditorVisibility(editor, visible, coverVisible = false) {
     const wrapper = editor.parentElement;
     const cover = wrapper?.querySelector(".overlay-cover");
 
     if (visible) {
         editor.classList.remove("overlay-hidden");
-        if (cover) cover.style.display = "block";
+        if (cover) cover.style.display = coverVisible ? "block" : "none";
     } else {
         editor.classList.add("overlay-hidden");
         if (cover) cover.style.display = "none";
     }
 }
 
+// Пересчитывает размер белой подложки под текущий текст.
 function updateCoverGeometry(editor) {
     const wrapper = editor.parentElement;
     const cover = wrapper?.querySelector(".overlay-cover");
@@ -372,13 +426,27 @@ function updateCoverGeometry(editor) {
     );
     const wrapperHeight =
         Number.parseFloat(wrapper.style.height || "0") || wrapper.clientHeight;
+    const editorHeight =
+        Number.parseFloat(editor.style.height || "0") || wrapperHeight;
+    const pdfTop = Number(editor.dataset.pdfTopPx || 0);
+    const pdfBottom = Number(editor.dataset.pdfBottomPx || wrapperHeight);
+    const wrapperTop = Number(editor.dataset.wrapperTopPx || 0);
+    const originalTop = pdfTop - wrapperTop - COVER_PAD_Y;
+    const originalBottom = pdfBottom - wrapperTop + COVER_PAD_Y;
+    const coverTop = Math.min(COVER_PAD_Y, originalTop);
+    const coverBottom = Math.max(
+        wrapperHeight - COVER_PAD_Y,
+        editorHeight,
+        originalBottom,
+    );
 
     cover.style.left = `${coverLeft}px`;
-    cover.style.top = `${COVER_PAD_Y}px`;
+    cover.style.top = `${coverTop}px`;
     cover.style.width = `${Math.max(coverRight - coverLeft, MIN_TEXT_WIDTH)}px`;
-    cover.style.height = `${Math.max(wrapperHeight - COVER_PAD_Y * 2, 1)}px`;
+    cover.style.height = `${Math.max(coverBottom - coverTop, 1)}px`;
 }
 
+// Обновляет визуальное состояние блока: редактирование, изменение и сдвиг.
 function updateEditorVisualState(editor) {
     const wrapper = editor.parentElement;
     const changed = editorHasChanges(editor);
@@ -394,7 +462,7 @@ function updateEditorVisualState(editor) {
     }
 
     if (editing || changed || moved) {
-        setEditorVisibility(editor, true);
+        setEditorVisibility(editor, true, changed || moved);
     } else {
         setEditorVisibility(editor, false);
     }
@@ -403,12 +471,14 @@ function updateEditorVisualState(editor) {
     updateCoverGeometry(editor);
 }
 
+// Проверяет, находятся ли два блока на одной визуальной строке.
 function sameVisualLine(a, b) {
     return (
         Math.abs(Number(a.dataset.originY) - Number(b.dataset.originY)) < 2.5
     );
 }
 
+// Проверяет, совпадает ли стиль двух PDF-спанов.
 function sameStyle(a, b) {
     return (
         (a.dataset.font || "") === (b.dataset.font || "") &&
@@ -418,12 +488,14 @@ function sameStyle(a, b) {
     );
 }
 
+// Сохраняет динамическую позицию блока и двигает его относительно исходной точки.
 function setDynamicLeft(editor, leftPx) {
     const originalLeft = Number(editor.dataset.leftPx || 0);
     editor.dataset.dynamicLeftPx = String(leftPx);
     editor.style.left = `${leftPx - originalLeft}px`;
 }
 
+// Возвращает последующие блоки цепочки на исходные позиции.
 function resetChainFrom(editor) {
     let current = getNextEditor(editor);
     while (current) {
@@ -436,6 +508,20 @@ function resetChainFrom(editor) {
     }
 }
 
+// Считает исходный промежуток между двумя соседними блоками.
+function getOriginalGapBetweenEditors(current, next) {
+    const currentOriginalLeft = Number(current.dataset.leftPx || 0);
+    const currentOriginalWidth = Number(
+        current.dataset.originalWidth || MIN_TEXT_WIDTH,
+    );
+    const nextOriginalLeft = Number(next.dataset.leftPx || 0);
+    return Math.max(
+        nextOriginalLeft - (currentOriginalLeft + currentOriginalWidth),
+        MIN_BLOCK_GAP,
+    );
+}
+
+// Сдвигает следующие блоки только при наложении или при сжатии обычного текста.
 function pushNextEditors(editor) {
     const next = getNextEditor(editor);
     if (!next) return true;
@@ -447,10 +533,25 @@ function pushNextEditors(editor) {
         parseFloat(editor.style.width || editor.dataset.originalWidth || "0"),
         getRequiredTextWidth(editor),
     );
-    const desiredNextLeft = currentLeft + currentWidth + 2;
+    const currentOriginalWidth = Number(
+        editor.dataset.originalWidth || MIN_TEXT_WIDTH,
+    );
+    const nextOriginalLeft = Number(next.dataset.leftPx || 0);
+    const originalGap = getOriginalGapBetweenEditors(editor, next);
+    const currentRight = currentLeft + currentWidth;
+    const overlapsNext = currentRight + MIN_BLOCK_GAP > nextOriginalLeft;
+    const isFlowTextPair = originalGap <= MAX_FLOW_GAP;
+    const currentBecameShorter = currentWidth < currentOriginalWidth;
 
-    const originalNextLeft = Number(next.dataset.leftPx || 0);
-    const appliedNextLeft = Math.max(desiredNextLeft, originalNextLeft);
+    let desiredNextLeft = nextOriginalLeft;
+
+    if (isFlowTextPair && currentBecameShorter) {
+        desiredNextLeft = currentRight + originalGap;
+    } else if (overlapsNext) {
+        desiredNextLeft = currentRight + MIN_BLOCK_GAP;
+    }
+
+    const appliedNextLeft = desiredNextLeft;
 
     const pageWidthPx = Number(next.dataset.pageWidthPx || 0);
     const nextOwnWidth = Math.max(
@@ -469,11 +570,13 @@ function pushNextEditors(editor) {
     return pushNextEditors(next);
 }
 
+// Пересчитывает всю цепочку блоков после текущего блока.
 function recomputeFlowFrom(editor) {
     resetChainFrom(editor);
     return pushNextEditors(editor);
 }
 
+// Обновляет размеры и визуальное состояние всей цепочки блоков.
 function updateChainVisuals(editor) {
     let current = editor;
     while (current) {
@@ -483,6 +586,7 @@ function updateChainVisuals(editor) {
     }
 }
 
+// Сохраняет состояние цепочки, чтобы можно было откатить неудачную правку.
 function snapshotChain(editor) {
     const snapshot = [];
     let current = editor;
@@ -499,6 +603,7 @@ function snapshotChain(editor) {
     return snapshot;
 }
 
+// Восстанавливает ранее сохраненное состояние цепочки блоков.
 function restoreChain(snapshot) {
     snapshot.forEach((item) => {
         const editor = document.querySelector(
@@ -526,6 +631,7 @@ function restoreChain(snapshot) {
     });
 }
 
+// Применяет новый текст к блоку и проверяет, помещается ли цепочка.
 function tryApplyEditorChange(editor, nextText, options = {}) {
     const snapshot = snapshotChain(editor);
 
@@ -552,6 +658,35 @@ function tryApplyEditorChange(editor, nextText, options = {}) {
     return true;
 }
 
+// Вставляет текст из буфера в текущую позицию курсора.
+function insertTextIntoEditor(editor, incomingText) {
+    const currentText = editorText(editor);
+    const { start, end } = getSelectionOffsets(editor);
+    const cleanText = (incomingText || "").replace(/\r?\n/g, " ");
+
+    if (!cleanText) {
+        setCursorOffset(editor, start);
+        return true;
+    }
+
+    const predictedText = buildPredictedText(
+        currentText,
+        cleanText,
+        start,
+        end,
+    );
+
+    if (tryApplyEditorChange(editor, predictedText)) {
+        setCursorOffset(editor, start + cleanText.length);
+        updateEditorVisualState(editor);
+        return true;
+    }
+
+    setCursorOffset(editor, start);
+    return false;
+}
+
+// Создает редактируемый HTML-блок поверх текста PDF.
 function createOverlayDiv(unit, pageData, pageWidthPx) {
     const wrapper = document.createElement("div");
     wrapper.className = "overlay-wrapper";
@@ -567,7 +702,7 @@ function createOverlayDiv(unit, pageData, pageWidthPx) {
     editor.dataset.editorId = crypto.randomUUID();
 
     const left = unit.x0 * scale;
-    const top = (unit.originY - unit.size * 0.92) * scale;
+    const top = (unit.originY - unit.size * HTML_BASELINE_RATIO) * scale;
 
     const targetWidth = Math.max((unit.x1 - unit.x0) * scale, MIN_TEXT_WIDTH);
     const baseWidth = Math.max(targetWidth + TEXT_WIDTH_PAD, 20);
@@ -628,6 +763,9 @@ function createOverlayDiv(unit, pageData, pageWidthPx) {
     editor.dataset.targetTextWidth = targetWidth;
     editor.dataset.maxWidth = maxWidth;
     editor.dataset.originY = unit.originY;
+    editor.dataset.wrapperTopPx = top;
+    editor.dataset.pdfTopPx = unit.y0 * scale;
+    editor.dataset.pdfBottomPx = unit.y1 * scale;
     editor.dataset.leftPx = left;
     editor.dataset.dynamicLeftPx = left;
 
@@ -683,7 +821,12 @@ function createOverlayDiv(unit, pageData, pageWidthPx) {
             const { start, end } = getSelectionOffsets(editor);
             const direction =
                 inputType === "deleteContentForward" ? "forward" : "backward";
-            const deleted = buildDeletedText(currentText, start, end, direction);
+            const deleted = buildDeletedText(
+                currentText,
+                start,
+                end,
+                direction,
+            );
 
             e.preventDefault();
 
@@ -711,15 +854,13 @@ function createOverlayDiv(unit, pageData, pageWidthPx) {
         ) {
             const currentText = editorText(editor);
             const { start, end } = getSelectionOffsets(editor);
-
             let incomingText = e.data ?? "";
 
             if (inputType === "insertFromPaste") {
-                incomingText = (
+                incomingText =
                     (e.clipboardData || window.clipboardData)?.getData(
                         "text",
-                    ) || ""
-                ).replace(/\r?\n/g, " ");
+                    ) || "";
             }
 
             incomingText = (incomingText || "").replace(/\r?\n/g, " ");
@@ -749,6 +890,22 @@ function createOverlayDiv(unit, pageData, pageWidthPx) {
         }
     });
 
+    editor.addEventListener("copy", (e) => {
+        const selectedText = getSelectedTextInside(editor);
+        if (!selectedText) return;
+
+        e.preventDefault();
+        e.clipboardData.setData("text/plain", selectedText);
+    });
+
+    editor.addEventListener("paste", (e) => {
+        e.preventDefault();
+        const pastedText =
+            (e.clipboardData || window.clipboardData)?.getData("text/plain") ||
+            "";
+        insertTextIntoEditor(editor, pastedText);
+    });
+
     wrapper.addEventListener("mousedown", (event) => {
         if (event.target === editor) {
             setEditorVisibility(editor, true);
@@ -759,7 +916,6 @@ function createOverlayDiv(unit, pageData, pageWidthPx) {
             setEditorVisibility(editor, true);
             requestAnimationFrame(() => {
                 editor.focus();
-                placeCursorAtEnd(editor);
             });
         }
     });
@@ -770,6 +926,7 @@ function createOverlayDiv(unit, pageData, pageWidthPx) {
     return wrapper;
 }
 
+// Связывает соседние текстовые блоки на одной строке для сдвига вправо.
 function linkEditorsOnPage(pageWrapper) {
     const editors = Array.from(pageWrapper.querySelectorAll(".overlay-text"));
 
@@ -790,14 +947,17 @@ function linkEditorsOnPage(pageWrapper) {
     }
 }
 
+// Загружает выбранный PDF на сервер и открывает его в редакторе.
 async function openPdf() {
     const file = pdfFileInput.files[0];
     if (!file) {
-        alert("Выбери PDF файл");
+        fileNameEl.textContent = "PDF súbor nevybraný";
+        setStatus("Vyberte PDF súbor.", true);
         return;
     }
     try {
-        setStatus("Загрузка PDF...");
+        fileNameEl.textContent = file.name;
+        setStatus("Načítavam PDF...");
         applyBtn.disabled = true;
         viewer.innerHTML = "";
 
@@ -812,7 +972,7 @@ async function openPdf() {
         const data = await response.json();
 
         if (!response.ok || data.error) {
-            throw new Error(data.error || "Ошибка открытия PDF");
+            throw new Error(data.error || "Chyba pri otvorení PDF.");
         }
 
         currentFilename = data.filename;
@@ -823,15 +983,17 @@ async function openPdf() {
         await renderPdfWithOverlay(currentPdfUrl, currentPages);
 
         applyBtn.disabled = false;
-        setStatus("PDF загружен");
+        setStatus("PDF bol načítaný.");
     } catch (error) {
         console.error(error);
-        setStatus(error.message || "Ошибка открытия PDF", true);
+        setStatus(error.message || "Chyba pri otvorení PDF.", true);
     }
 }
 
+// Пересчитывает размеры всех текстовых блоков после загрузки страницы.
 function resizeAllOverlayTexts() {
     const editors = document.querySelectorAll(".overlay-text");
+
     editors.forEach((editor) => {
         if (!editorHasChanges(editor) && document.activeElement !== editor) {
             editor.style.width = `${editor.dataset.originalWidth}px`;
@@ -840,6 +1002,7 @@ function resizeAllOverlayTexts() {
     });
 }
 
+// Рендерит PDF через pdf.js и накладывает редактируемый HTML-слой.
 async function renderPdfWithOverlay(pdfUrl, pagesData) {
     viewer.innerHTML = "";
     const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
@@ -889,6 +1052,7 @@ async function renderPdfWithOverlay(pdfUrl, pagesData) {
     resizeAllOverlayTexts();
 }
 
+// Собирает список измененных или сдвинутых блоков для сохранения в PDF.
 function collectChanges() {
     const editors = Array.from(document.querySelectorAll(".overlay-text"));
     const changes = [];
@@ -904,6 +1068,7 @@ function collectChanges() {
         const currentWidthPx = parseFloat(
             el.style.width || el.dataset.originalWidth || "0",
         );
+        const currentRightPdf = (dynamicLeftPx + currentWidthPx) / scale;
 
         const moved = Math.abs(dynamicLeftPx - originalLeftPx) > 0.5;
         const textChanged = normalize(oldText) !== normalize(newText);
@@ -920,7 +1085,7 @@ function collectChanges() {
             y0: Number(el.dataset.y0),
             x1: Number(el.dataset.x1),
             y1: Number(el.dataset.y1),
-            maxX: Number(el.dataset.pageWidthPx) / scale - 2,
+            maxX: currentRightPdf,
             font: el.dataset.font || "",
             size: Number(el.dataset.size),
             color: Number(el.dataset.color),
@@ -928,7 +1093,7 @@ function collectChanges() {
             originY: Number(el.dataset.originY),
 
             drawX: dynamicLeftPx / scale,
-            currentX1: (dynamicLeftPx + currentWidthPx) / scale,
+            currentX1: currentRightPdf,
             movedOnly: moved && !textChanged,
         });
     }
@@ -936,20 +1101,21 @@ function collectChanges() {
     return changes;
 }
 
+// Отправляет изменения на сервер и скачивает новый PDF.
 async function applyPdfChanges() {
     if (!currentFilename) {
-        alert("Сначала загрузи PDF");
+        alert("Najprv nahrajte PDF.");
         return;
     }
     try {
         const changes = collectChanges();
 
         if (changes.length === 0) {
-            alert("Нет изменений для сохранения");
+            alert("Nie sú žiadne zmeny na uloženie.");
             return;
         }
 
-        setStatus("Сохранение PDF...");
+        setStatus("Ukladám PDF...");
         applyBtn.disabled = true;
 
         const response = await fetch("/api/pdf/apply", {
@@ -966,14 +1132,14 @@ async function applyPdfChanges() {
         const data = await response.json();
 
         if (!response.ok || data.error) {
-            throw new Error(data.error || "Ошибка сохранения PDF");
+            throw new Error(data.error || "Chyba pri ukladaní PDF.");
         }
 
-        setStatus("PDF сохранён");
+        setStatus("PDF bol uložený.");
         window.location.href = data.downloadUrl;
     } catch (error) {
         console.error(error);
-        setStatus(error.message || "Ошибка сохранения PDF", true);
+        setStatus(error.message || "Chyba pri ukladaní PDF.", true);
     } finally {
         applyBtn.disabled = false;
     }

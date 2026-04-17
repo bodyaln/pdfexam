@@ -2,6 +2,20 @@ let currentFilename = null;
 let currentPages = [];
 let currentPdfUrl = null;
 const scale = 1.5;
+const appBasePath = (() => {
+    const scriptPath = document.currentScript?.src
+        ? new URL(document.currentScript.src).pathname
+        : "";
+    const marker = "/static/app.js";
+    return scriptPath.endsWith(marker)
+        ? scriptPath.slice(0, -marker.length)
+        : "";
+})();
+
+function appUrl(path) {
+    const cleanPath = String(path || "").replace(/^\/+/, "");
+    return appBasePath ? `${appBasePath}/${cleanPath}` : `/${cleanPath}`;
+}
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
     "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
@@ -63,7 +77,7 @@ async function registerFontFaces(fontFaces) {
             (font) => `
 @font-face {
   font-family: "${font.fontFamily}";
-  src: url("${font.url}");
+  src: url("${appUrl(font.url)}");
   font-style: ${font.fontStyle || "normal"};
   font-weight: ${font.fontWeight || "400"};
 }
@@ -462,7 +476,7 @@ function updateEditorVisualState(editor) {
     }
 
     if (editing || changed || moved) {
-        setEditorVisibility(editor, true, changed || moved);
+        setEditorVisibility(editor, true, true);
     } else {
         setEditorVisibility(editor, false);
     }
@@ -771,7 +785,7 @@ function createOverlayDiv(unit, pageData, pageWidthPx) {
 
     editor.addEventListener("focus", () => {
         wrapper.classList.add("editing");
-        setEditorVisibility(editor, true);
+        setEditorVisibility(editor, true, true);
         resizeBlockToText(editor);
         recomputeFlowFrom(editor);
         updateEditorVisualState(editor);
@@ -908,12 +922,12 @@ function createOverlayDiv(unit, pageData, pageWidthPx) {
 
     wrapper.addEventListener("mousedown", (event) => {
         if (event.target === editor) {
-            setEditorVisibility(editor, true);
+            setEditorVisibility(editor, true, true);
             return;
         }
 
         if (document.activeElement !== editor) {
-            setEditorVisibility(editor, true);
+            setEditorVisibility(editor, true, true);
             requestAnimationFrame(() => {
                 editor.focus();
             });
@@ -964,7 +978,7 @@ async function openPdf() {
         const formData = new FormData();
         formData.append("pdf", file);
 
-        const response = await fetch("/api/pdf/open", {
+        const response = await fetch(appUrl("api/pdf/open"), {
             method: "POST",
             body: formData,
         });
@@ -977,7 +991,7 @@ async function openPdf() {
 
         currentFilename = data.filename;
         currentPages = data.pages || [];
-        currentPdfUrl = data.pdfUrl;
+        currentPdfUrl = appUrl(data.pdfUrl);
 
         await registerFontFaces(data.fontFaces || []);
         await renderPdfWithOverlay(currentPdfUrl, currentPages);
@@ -1118,7 +1132,7 @@ async function applyPdfChanges() {
         setStatus("Ukladám PDF...");
         applyBtn.disabled = true;
 
-        const response = await fetch("/api/pdf/apply", {
+        const response = await fetch(appUrl("api/pdf/apply"), {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -1136,7 +1150,7 @@ async function applyPdfChanges() {
         }
 
         setStatus("PDF bol uložený.");
-        window.location.href = data.downloadUrl;
+        window.location.href = appUrl(data.downloadUrl);
     } catch (error) {
         console.error(error);
         setStatus(error.message || "Chyba pri ukladaní PDF.", true);

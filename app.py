@@ -27,6 +27,7 @@ BUILTIN_FONTNAMES = {
 }
 MIN_REPLACEMENT_FONT_SIZE = 5.0
 MIN_TEXT_HORIZONTAL_SCALE = 0.65
+MAX_TEXT_HORIZONTAL_SCALE = 1.18
 
 PREFIX_ACCENT_MARKS = {
     "\u00b4": "\u0301",
@@ -119,6 +120,8 @@ def style_key(is_bold: bool, is_italic: bool) -> str:
 def classify_family(font_name: str) -> str:
     name = clean_font_name(font_name).lower()
 
+    if any(x in name for x in ["timesnewroman", "times new roman", "times-roman"]):
+        return "times"
     if any(x in name for x in ["cm", "lmroman", "latinmodern", "cmbx", "cmr", "cmti", "ec"]):
         return "tex"
     if any(x in name for x in ["arial", "helvetica", "calibri", "sans"]):
@@ -131,6 +134,8 @@ def classify_family(font_name: str) -> str:
 # Возвращает безопасный браузерный fallback для CSS.
 def browser_safe_font_name(pdf_font_name: str) -> str:
     family = classify_family(pdf_font_name)
+    if family == "times":
+        return "Times New Roman, Times, serif"
     if family == "sans":
         return "Arial, Helvetica, sans-serif"
     if family == "mono":
@@ -188,7 +193,7 @@ def register_runtime_font(font_buffer: bytes, ext: str, font_name: str) -> str:
         "buffer": font_buffer,
         "mimetype": font_mimetype(ext),
     }
-    return f"/runtime_fonts/{font_id}"
+    return f"runtime_fonts/{font_id}"
 
 
 # Создает объект PyMuPDF Font из байтов шрифта.
@@ -263,10 +268,259 @@ def extract_original_font_resource(doc, page, span_font_name: str):
     return None
 
 
+def parse_to_unicode_reverse_map(doc, font_xref: int):
+    obj = doc.xref_object(font_xref)
+    refs = re.findall(r"/ToUnicode\s+(\d+)\s+0\s+R", obj)
+    if not refs:
+        return {}
+
+    stream = doc.xref_stream(int(refs[0]))
+    if not stream:
+        return {}
+
+    text = stream.decode("latin1", errors="ignore")
+    reverse = {}
+
+    for block in re.findall(r"beginbfchar\s*(.*?)\s*endbfchar", text, re.S):
+        for src, dst in re.findall(r"<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>", block):
+            try:
+                chars = bytes.fromhex(dst).decode("utf-16-be")
+            except Exception:
+                continue
+            if len(chars) == 1:
+                reverse[chars] = src.upper()
+
+    for block in re.findall(r"beginbfrange\s*(.*?)\s*endbfrange", text, re.S):
+        for start, end, dst in re.findall(
+            r"<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>",
+            block,
+        ):
+            try:
+                start_int = int(start, 16)
+                end_int = int(end, 16)
+                dst_int = int(dst, 16)
+                width = len(start)
+            except Exception:
+                continue
+
+            for offset, code in enumerate(range(start_int, end_int + 1)):
+                try:
+                    char = chr(dst_int + offset)
+                except Exception:
+                    continue
+                reverse[char] = f"{code:0{width}X}"
+
+    return reverse
+
+
+def parse_width_array_values(value: str):
+    return [
+        float(item)
+        for item in re.findall(r"[-+]?(?:\d+\.\d+|\d+)", value or "")
+    ]
+
+
+def parse_simple_font_widths(doc, font_xref: int):
+    obj = doc.xref_object(font_xref)
+    first_match = re.search(r"/FirstChar\s+(\d+)", obj)
+    widths_match = re.search(r"/Widths\s*\[(.*?)\]", obj, re.S)
+    if not first_match or not widths_match:
+        return {}
+
+    first_char = int(first_match.group(1))
+    values = parse_width_array_values(widths_match.group(1))
+    return {
+        f"{first_char + index:02X}": width
+        for index, width in enumerate(values)
+    }
+
+
+def parse_cid_font_widths(doc, font_xref: int):
+    obj = doc.xref_object(font_xref)
+    refs = re.findall(r"/DescendantFonts\s*\[\s*(\d+)\s+0\s+R", obj)
+    if refs:
+        obj = doc.xref_object(int(refs[0]))
+
+    widths = {}
+
+    for section in re.findall(r"(\d+)\s*\[(.*?)\]", obj, re.S):
+        start = int(section[0])
+        values = parse_width_array_values(section[1])
+        width_digits = 4
+        for index, width in enumerate(values):
+            widths[f"{start + index:0{width_digits}X}"] = width
+
+    for start, end, width in re.findall(
+        r"(\d+)\s+(\d+)\s+([-+]?(?:\d+\.\d+|\d+))",
+        re.sub(r"\d+\s*\[.*?\]", "", obj, flags=re.S),
+    ):
+        for code in range(int(start), int(end) + 1):
+            widths[f"{code:04X}"] = float(width)
+
+    return widths
+
+
+def parse_font_resource_widths(doc, font_xref: int, encoding: str):
+    if "Identity" in (encoding or ""):
+        return parse_cid_font_widths(doc, font_xref)
+    return parse_simple_font_widths(doc, font_xref)
+
+
+def page_font_resource_candidates(doc, page, font_name: str, flags: int):
+    wanted = clean_font_name(font_name).lower()
+    wanted_bold, wanted_italic = font_traits(font_name, flags)
+    candidates = []
+
+    for item in page.get_fonts(full=True):
+        xref = item[0]
+        base_font = clean_font_name(item[3] if len(item) > 3 else "")
+        resource_name = item[4] if len(item) > 4 else ""
+        encoding = item[5] if len(item) > 5 else ""
+
+        if not resource_name:
+            continue
+
+        base_lower = base_font.lower()
+        if not (base_lower == wanted or base_lower in wanted or wanted in base_lower):
+            continue
+
+        is_bold, is_italic = font_traits(base_font, 0)
+        if is_bold != wanted_bold or is_italic != wanted_italic:
+            continue
+
+        reverse_map = parse_to_unicode_reverse_map(doc, xref)
+        if not reverse_map:
+            continue
+        widths = parse_font_resource_widths(doc, xref, encoding)
+
+        candidates.append({
+            "resource_name": resource_name,
+            "base_font": base_font,
+            "encoding": encoding,
+            "reverse_map": reverse_map,
+            "widths": widths,
+        })
+
+    candidates.sort(
+        key=lambda item: (
+            "Identity" in item["encoding"],
+            -len(item["reverse_map"]),
+        )
+    )
+    return candidates
+
+
+def build_pdf_resource_chunks(doc, page, font_name: str, flags: int, text: str):
+    candidates = page_font_resource_candidates(doc, page, font_name, flags)
+    if not candidates:
+        return None
+
+    chunks = []
+    current_resource = None
+    current_codes = []
+    width = 0.0
+
+    for char in text:
+        candidate = next(
+            (item for item in candidates if char in item["reverse_map"]),
+            None,
+        )
+        if candidate is None:
+            return None
+
+        resource = candidate["resource_name"]
+        code = candidate["reverse_map"][char]
+        code_width = candidate.get("widths", {}).get(code)
+        if code_width is None:
+            return None
+        width += float(code_width)
+
+        if resource != current_resource:
+            if current_codes:
+                chunks.append({
+                    "resource_name": current_resource,
+                    "hex": "".join(current_codes),
+                })
+            current_resource = resource
+            current_codes = [code]
+        else:
+            current_codes.append(code)
+
+    if current_codes:
+        chunks.append({
+            "resource_name": current_resource,
+            "hex": "".join(current_codes),
+        })
+
+    return {
+        "chunks": chunks,
+        "width_units": width,
+    }
+
+
+def append_page_content_stream(doc, page, stream: str):
+    page.wrap_contents()
+    existing = page.get_contents()
+    xref = doc.get_new_xref()
+    doc.update_object(xref, "<< /Length 0 >>")
+    doc.update_stream(xref, stream.encode("latin1"), compress=True)
+    contents = "[" + " ".join(f"{item} 0 R" for item in existing + [xref]) + "]"
+    doc.xref_set_key(page.xref, "Contents", contents)
+
+
+def pdf_number(value: float) -> str:
+    return f"{float(value):.4f}".rstrip("0").rstrip(".") or "0"
+
+
+def insert_pdf_resource_text_operation(page, operation):
+    chunks = operation["selected_font"].get("chunks") or []
+    if not chunks:
+        return False
+
+    doc = page.parent
+    x = float(operation["draw_x"])
+    y = float(page.rect.height - operation["baseline_y"])
+    scale_x = float(operation.get("text_scale_x", 1) or 1)
+    r, g, b = operation["color"]
+    font_size = float(operation["font_size"])
+
+    parts = [
+        "q",
+        f"{pdf_number(r)} {pdf_number(g)} {pdf_number(b)} rg",
+        "BT",
+        f"{pdf_number(scale_x)} 0 0 1 {pdf_number(x)} {pdf_number(y)} Tm",
+    ]
+
+    for chunk in chunks:
+        parts.append(
+            f"/{chunk['resource_name']} {pdf_number(font_size)} Tf <{chunk['hex']}> Tj"
+        )
+
+    parts.extend(["ET", "Q"])
+    append_page_content_stream(doc, page, "\n".join(parts) + "\n")
+    return True
+
+
 # Выбирает шрифт для вставки нового текста в PDF.
 def choose_insert_font(doc, page, font_name: str, flags: int, text: str):
     text = normalize_pdf_unicode_text(text)
     is_bold, is_italic = font_traits(font_name, flags)
+
+    resource_plan = build_pdf_resource_chunks(doc, page, font_name, flags, text)
+    if resource_plan:
+        resource = extract_original_font_resource(doc, page, font_name)
+        font_obj = None
+        if resource:
+            font_obj = create_font_obj_from_buffer(resource["font_buffer"])
+        if font_obj:
+            width = float(resource_plan["width_units"]) * 0.001
+            return {
+                "mode": "pdf_resources",
+                "font_obj": font_obj,
+                "chunks": resource_plan["chunks"],
+                "width_units": resource_plan["width_units"],
+                "text_length": lambda text_value, fontsize: width * float(fontsize),
+            }
 
     resource = extract_original_font_resource(doc, page, font_name)
     if resource:
@@ -365,41 +619,78 @@ def collect_page_font_faces(doc, page):
                     final_ext = fallback["ext"]
 
             if final_buffer:
+                web_font_url = register_runtime_font(final_buffer, final_ext, base_font)
+                web_font_family = Path(web_font_url).name.rsplit(".", 1)[0]
                 font_map[base_font.lower()] = {
-                    "webFontFamily": slugify(base_font),
-                    "webFontUrl": register_runtime_font(final_buffer, final_ext, base_font),
+                    **font_map.get(base_font.lower(), {}),
+                }
+                font_map.setdefault(base_font.lower(), {}).setdefault("candidates", []).append({
+                    "webFontFamily": web_font_family,
+                    "webFontUrl": web_font_url,
                     "fontStyle": "italic" if is_italic else "normal",
                     "fontWeight": "700" if is_bold else "400",
-                }
+                    "fontObj": create_font_obj_from_buffer(final_buffer),
+                })
             else:
-                font_map[base_font.lower()] = {
+                font_map.setdefault(base_font.lower(), {}).setdefault("candidates", []).append({
                     "webFontFamily": None,
                     "webFontUrl": None,
                     "fontStyle": "italic" if is_italic else "normal",
                     "fontWeight": "700" if is_bold else "400",
-                }
+                    "fontObj": None,
+                })
         except Exception:
             continue
 
     return font_map
 
 
-# Находит лучший web-шрифт для конкретного PDF-шрифта.
-def find_best_web_font(font_name: str, page_font_map: dict):
+# Находит лучший web-шрифт для конкретного PDF-шрифта и ширины текста.
+def find_best_web_font(font_name: str, page_font_map: dict, text="", size=12, target_width=None):
     cleaned = clean_font_name(font_name).lower()
 
-    if cleaned in page_font_map:
-        return page_font_map[cleaned]
+    candidates = []
 
-    for key, value in page_font_map.items():
-        if cleaned == key or cleaned in key or key in cleaned:
-            return value
+    if cleaned in page_font_map:
+        candidates = page_font_map[cleaned].get("candidates", [])
+    else:
+        for key, value in page_font_map.items():
+            if cleaned == key or cleaned in key or key in cleaned:
+                candidates = value.get("candidates", [])
+                break
+
+    if candidates:
+        target_width = float(target_width or 0)
+        if target_width > 0:
+            best = None
+            best_delta = None
+
+            for candidate in candidates:
+                font_obj = candidate.get("fontObj")
+                if font_obj is None:
+                    continue
+
+                try:
+                    width = font_obj.text_length(text or "", fontsize=float(size or 12))
+                except Exception:
+                    continue
+
+                delta = abs(width - target_width)
+                if best_delta is None or delta < best_delta:
+                    best = candidate
+                    best_delta = delta
+
+            if best is not None:
+                return best
+
+        return candidates[0]
 
     return {
         "webFontFamily": None,
         "webFontUrl": None,
         "fontStyle": "normal",
         "fontWeight": "400",
+        "fontObj": None,
     }
 
 
@@ -424,8 +715,15 @@ def build_unit_from_spans(page_index: int, spans: list, page_font_map: dict):
 
     font_name = dominant.get("font", "")
     flags = int(dominant.get("flags", 0))
+    size = float(dominant.get("size", 12))
     is_bold, is_italic = font_traits(font_name, flags)
-    web_font = find_best_web_font(font_name, page_font_map)
+    web_font = find_best_web_font(
+        font_name,
+        page_font_map,
+        text=full_text,
+        size=size,
+        target_width=x1 - x0,
+    )
 
     return {
         "id": str(uuid.uuid4()),
@@ -442,7 +740,7 @@ def build_unit_from_spans(page_index: int, spans: list, page_font_map: dict):
         "webFontUrl": web_font["webFontUrl"],
         "webFontStyle": web_font["fontStyle"],
         "webFontWeight": web_font["fontWeight"],
-        "size": float(dominant.get("size", 12)),
+        "size": size,
         "color": int(dominant.get("color", 0)),
         "flags": flags,
         "isBold": is_bold,
@@ -682,13 +980,30 @@ def build_text_operation(
     available_width = max(right_limit - draw_x, 1)
 
     try:
-        final_width = selected_font["font_obj"].text_length(new_text, fontsize=font_size)
+        if selected_font["mode"] == "pdf_resources":
+            final_width = selected_font["width_units"] * 0.001 * font_size
+        else:
+            final_width = selected_font["font_obj"].text_length(new_text, fontsize=font_size)
     except Exception:
         return None
 
     text_scale_x = 1.0
     rendered_width = final_width
-    if final_width > available_width + 1.5:
+    target_width = None
+    if current_x1_override is not None:
+        target_width = max(float(current_x1_override) - draw_x, 1)
+
+    if selected_font["mode"] == "pdf_resources" and target_width:
+        target_scale_x = target_width / final_width if final_width > 0 else 1
+        if MIN_TEXT_HORIZONTAL_SCALE <= target_scale_x <= MAX_TEXT_HORIZONTAL_SCALE:
+            text_scale_x = target_scale_x
+            rendered_width = target_width
+        elif final_width > available_width + 1.5:
+            text_scale_x = available_width / final_width
+            if text_scale_x < MIN_TEXT_HORIZONTAL_SCALE:
+                return None
+            rendered_width = available_width
+    elif final_width > available_width + 1.5:
         text_scale_x = available_width / final_width
         if text_scale_x < MIN_TEXT_HORIZONTAL_SCALE:
             return None
@@ -721,6 +1036,9 @@ def insert_text_operation(page, operation):
 
     selected_font = operation["selected_font"]
     try:
+        if selected_font["mode"] == "pdf_resources":
+            return insert_pdf_resource_text_operation(page, operation)
+
         if selected_font["mode"] == "buffer":
             runtime_font_name = f"F_{uuid.uuid4().hex[:8]}"
             page.insert_font(fontname=runtime_font_name, fontbuffer=selected_font["font_buffer"])
@@ -805,7 +1123,7 @@ def open_pdf():
         pages, font_faces = extract_pdf_data_from_bytes(pdf_bytes)
         return jsonify({
             "filename": file_id,
-            "pdfUrl": f"/api/pdf/source/{file_id}",
+            "pdfUrl": f"api/pdf/source/{file_id}",
             "pages": pages,
             "fontFaces": font_faces,
         })
@@ -915,7 +1233,7 @@ def apply_pdf_changes():
         }
 
         return jsonify({
-            "downloadUrl": f"/api/pdf/download/{output_id}"
+            "downloadUrl": f"api/pdf/download/{output_id}"
         })
     except Exception as e:
         traceback.print_exc()
@@ -964,4 +1282,4 @@ def runtime_font_file(font_id):
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5001, debug=True, use_reloader=False)
+    app.run(host="127.0.0.1", port=5002, debug=True, use_reloader=False)

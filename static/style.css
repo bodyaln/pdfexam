@@ -157,11 +157,6 @@ input[type="file"] {
     caret-color: #000;
 }
 
-.overlay-wrapper.editing:not(.changed):not(.moved) .overlay-text {
-    color: transparent;
-    caret-color: #000;
-}
-
 .overlay-wrapper.changed .overlay-text {
     box-shadow: inset 0 0 0 1px #16a34a;
     z-index: 4;
